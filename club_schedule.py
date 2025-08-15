@@ -1,3 +1,4 @@
+
 import io
 import re
 import urllib.parse
@@ -7,6 +8,9 @@ import streamlit as st
 st.set_page_config(page_title="Club Schedule", page_icon="🏃", layout="wide")
 st.title("🏃 Club Schedule — Review & Checks")
 
+# -----------------------------
+# Utilities
+# -----------------------------
 def infer_meet_location(notes: str) -> str:
     if not isinstance(notes, str) or not notes.strip():
         return ""
@@ -62,6 +66,7 @@ def load_from_google_csv(url: str):
         st.error("Could not extract Sheet ID from URL.")
         return None
     dfs = {}
+    # Route Master (accept variants)
     for tab in ["Route Master", "RouteMaster", "Routemaster"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
@@ -70,18 +75,21 @@ def load_from_google_csv(url: str):
                 break
         except Exception:
             pass
+    # Schedule
     try:
         df = load_google_sheet_csv(sheet_id, "Schedule")
         if not df.empty:
             dfs["Schedule"] = df
     except Exception:
         pass
+    # Config
     try:
         df = load_google_sheet_csv(sheet_id, "Config")
         if not df.empty:
             dfs["Config"] = df
     except Exception:
         pass
+    # Optional
     for tab in ["Rules", "Pair Map", "Fetch GPX Checklist"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
@@ -94,6 +102,7 @@ def load_from_google_csv(url: str):
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
     dfs = {}
+    # Route Master-like sheet
     rm_name = None
     for name in xls.sheet_names:
         if name.lower().replace(" ", "") in {"routemaster", "route_master"}:
@@ -111,6 +120,9 @@ def load_from_excel_bytes(bts: bytes):
             dfs[opt] = pd.read_excel(xls, opt)
     return dfs
 
+# -----------------------------
+# Data source controls
+# -----------------------------
 mode = st.radio(
     "Load data from:",
     ["Google Sheet (CSV export — recommended)", "Upload Excel (.xlsx)", "Upload CSV files"],
@@ -144,9 +156,9 @@ else:
                     return pd.read_csv(name_map[nv.lower()])
             return pd.DataFrame()
         dfs = {}
-        dfs["Route Master"] = read_csv_if(["routemaster.csv", "route master.csv", "routemaster.csv"])
-        dfs["Schedule"] = read_csv_if(["schedule.csv"])
-        dfs["Config"] = read_csv_if(["config.csv"])
+        dfs["Route Master"] = read_csv_if(["RouteMaster.csv", "Route Master.csv", "Routemaster.csv"])
+        dfs["Schedule"] = read_csv_if(["Schedule.csv"])
+        dfs["Config"] = read_csv_if(["Config.csv"])
         if "rules.csv" in name_map:
             dfs["Rules"] = pd.read_csv(name_map["rules.csv"])
 
@@ -154,6 +166,7 @@ if not dfs:
     st.info("Load your data to continue.")
     st.stop()
 
+# Harmonize
 if "RouteMaster" in dfs and "Route Master" not in dfs:
     dfs["Route Master"] = dfs["RouteMaster"]
 schedule = dfs.get("Schedule", pd.DataFrame())
@@ -161,18 +174,25 @@ route_master = dfs.get("Route Master", pd.DataFrame())
 config = dfs.get("Config", pd.DataFrame())
 rules = dfs.get("Rules", pd.DataFrame())
 
+# -----------------------------
+# Config + derived fields
+# -----------------------------
 overused_threshold = int(cfg_value(config, "Overused Threshold (uses/year)", 3))
 dark_start = pd.to_datetime(cfg_value(config, "Dark Season Start (YYYY-MM-DD)", "2025-10-27"))
 dark_end   = pd.to_datetime(cfg_value(config, "Dark Season End (YYYY-MM-DD)", "2026-03-30"))
 allowed_dark  = set(str(cfg_value(config, "Allowed Terrain in Dark Season", "Road")).split(","))
 allowed_light = set(str(cfg_value(config, "Light Season Allowed Terrain", "Road,Trail,Mixed")).split(","))
 
+# Parse datetimes + meet location
 if not schedule.empty:
     if "Date (Thu)" in schedule.columns:
         schedule["Date (Thu)"] = pd.to_datetime(schedule["Date (Thu)"])
     if "Meet Location" not in schedule.columns and "Notes" in schedule.columns:
         schedule["Meet Location"] = schedule["Notes"].apply(infer_meet_location)
 
+# -----------------------------
+# Display + checks
+# -----------------------------
 st.subheader("Schedule")
 st.dataframe(schedule.fillna(""), use_container_width=True, hide_index=True)
 
@@ -200,6 +220,7 @@ if not route_master.empty and "Route Name" in route_master.columns:
     never_used = sorted([r for r in (master_names - used_names) if r and r.lower() != "no run"])
     never_used_df = pd.DataFrame({"Route": never_used})
 
+# Season mismatches
 violations = []
 for _, r in schedule.iterrows():
     d = r.get("Date (Thu)")

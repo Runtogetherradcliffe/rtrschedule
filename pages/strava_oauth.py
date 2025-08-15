@@ -1,3 +1,4 @@
+
 import urllib.parse
 import requests
 import streamlit as st
@@ -5,7 +6,7 @@ import streamlit as st
 st.set_page_config(page_title="Strava OAuth", page_icon="🔑", layout="centered")
 st.title("🔑 Connect Strava")
 
-st.markdown("""
+st.markdown(\"\"\"
 To enable **Strava route validation & GPX export**, connect your Strava account.
 
 **Setup (one-time, owner/admin):**
@@ -23,7 +24,7 @@ STRAVA_CLIENT_SECRET = "xxxxxxxxxxxxxxxx"
 STRAVA_REDIRECT_URI = "https://your-app.streamlit.app"
 ```
 Then return here and click **Connect with Strava**.
-""")
+\"\"\")
 
 client_id = st.secrets.get("STRAVA_CLIENT_ID")
 client_secret = st.secrets.get("STRAVA_CLIENT_SECRET")
@@ -46,6 +47,7 @@ auth_url = "https://www.strava.com/oauth/authorize?" + urllib.parse.urlencode(pa
 
 st.link_button("Connect with Strava", auth_url, type="primary")
 
+# Handle callback code
 query_params = st.experimental_get_query_params()
 code = query_params.get("code", [None])[0]
 error = query_params.get("error", [None])[0]

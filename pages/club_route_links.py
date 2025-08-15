@@ -1,3 +1,4 @@
+
 import io
 import re
 import time
@@ -10,6 +11,9 @@ import streamlit as st
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
 st.title("🗺️ Route Links & GPX — Validate & Fetch (Strava-aware)")
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def clean(x):
     if pd.isna(x): return ""
     return str(x).strip()
@@ -44,6 +48,9 @@ def load_from_excel_bytes(bts: bytes):
         dfs["Schedule"] = pd.read_excel(xls, "Schedule")
     return dfs
 
+# -----------------------------
+# Link parsing/normalization
+# -----------------------------
 @dataclass
 class LinkInfo:
     link_type: str
@@ -114,6 +121,9 @@ def classify_access(u: str, info: dict) -> str:
         return "Needs Auth/Not Public"
     return "OK"
 
+# -----------------------------
+# UI: load data
+# -----------------------------
 mode = st.radio("Load from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
 dfs = None
@@ -171,6 +181,9 @@ for _, row in sched.iterrows():
 links_df = pd.DataFrame(long_rows)
 st.write(f"Found {len(links_df)} route link entries from the Schedule.")
 
+# -----------------------------
+# Validate links
+# -----------------------------
 st.subheader("Validate Links")
 limit = st.slider("Limit rows to validate", min_value=10, max_value=links_df.shape[0], value=min(200, links_df.shape[0]), step=10)
 
@@ -201,11 +214,15 @@ report_df = pd.DataFrame(rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
+# -----------------------------
+# GPX Export
+# -----------------------------
 st.subheader("Export GPX")
 st.caption("Direct .gpx links download immediately. For Strava Routes, connect OAuth on the **Strava OAuth** page first.")
 
 token = st.session_state.get("strava_token")
 
+# Direct GPX
 gpx_ok = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if not gpx_ok.empty:
     pick = st.multiselect("Select direct-GPX routes to download", gpx_ok["Route Name"].tolist(), key="pick_gpx_direct")
@@ -216,8 +233,7 @@ if not gpx_ok.empty:
             for _, row in gpx_ok[gpx_ok["Route Name"].isin(pick)].iterrows():
                 url = row["URL"]
                 try:
-                    resp = requests.get(url, timeout=20)
-                    resp.raise_for_status()
+                    resp = requests.get(url, timeout=20); resp.raise_for_status()
                     base = urllib.parse.urlparse(url).path.split("/")[-1] or "route.gpx"
                     fname = f"{row['Route Name'][:50].replace('/', '-')}-{base}"
                     zf.writestr(fname, resp.content)
@@ -225,6 +241,7 @@ if not gpx_ok.empty:
                     st.warning(f"Failed to download {row['Route Name']}: {e}")
         st.download_button("⬇️ Download GPX ZIP (direct)", data=zip_buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
 
+# Strava via API (requires OAuth token)
 if token:
     strava_routes = report_df[report_df["URL"].str.contains("strava.com/routes/")].copy()
     if not strava_routes.empty:
