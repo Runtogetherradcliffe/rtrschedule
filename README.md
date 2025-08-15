@@ -1,3 +1,5 @@
-# Running Club App
+# Running Club App (Strava-ready)
 
-Upload all files, set Strava secrets in Streamlit Cloud, then connect via the Strava OAuth page.
+- Token auto-capture on any page via query params
+- Strava routes marked 'Needs Auth/Not Public' when not connected
+- GPX export via Strava API when connected
