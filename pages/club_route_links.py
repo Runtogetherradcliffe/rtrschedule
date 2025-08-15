@@ -1,6 +1,7 @@
 
 import io
 import re
+import time
 import urllib.parse
 from dataclasses import dataclass
 import pandas as pd
@@ -8,7 +9,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
-st.title("🗺️ Route Links & GPX — Validate & Fetch (Schedule-aware)")
+st.title("🗺️ Route Links & GPX — Validate & Fetch (robust Strava checks)")
 
 # -----------------------------
 # Helpers
@@ -35,7 +36,11 @@ def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
 def load_from_google_csv(url: str):
     sheet_id = extract_sheet_id(url)
     dfs = {}
-    # Try multiple names for Route Master; it's optional now
+    # Schedule is the primary source
+    df = load_google_sheet_csv(sheet_id, "Schedule")
+    if not df.empty:
+        dfs["Schedule"] = df
+    # Optional
     for tab in ["Route Master", "RouteMaster", "Routemaster"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
@@ -43,39 +48,22 @@ def load_from_google_csv(url: str):
                 dfs["Route Master"] = df
                 break
         except Exception:
-            continue
-    # Schedule is now PRIMARY source
-    for tab in ["Schedule"]:
-        try:
-            df = load_google_sheet_csv(sheet_id, tab)
-            if not df.empty:
-                dfs["Schedule"] = df
-        except Exception:
             pass
     return dfs
 
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
     dfs = {}
-    # Optional route master
-    rm_name = None
-    for name in xls.sheet_names:
-        if name.lower().replace(" ", "") in {"routemaster", "route_master"}:
-            rm_name = name; break
-    if rm_name is not None:
-        dfs["Route Master"] = pd.read_excel(xls, rm_name)
-    # Schedule
     if "Schedule" in xls.sheet_names:
         dfs["Schedule"] = pd.read_excel(xls, "Schedule")
-    else:
-        # Try a loose match
-        for name in xls.sheet_names:
-            if name.lower().startswith("sched"):
-                dfs["Schedule"] = pd.read_excel(xls, name); break
+    for opt in ["Route Master", "RouteMaster"]:
+        if opt in xls.sheet_names:
+            dfs["Route Master"] = pd.read_excel(xls, opt)
+            break
     return dfs
 
 # -----------------------------
-# Link parsing
+# Link parsing/normalization
 # -----------------------------
 @dataclass
 class LinkInfo:
@@ -88,6 +76,45 @@ STRAVA_ROUTE_RE = re.compile(r"strava\.com/routes/(\d+)", re.I)
 STRAVA_ACTIVITY_RE = re.compile(r"strava\.com/activities/(\d+)", re.I)
 PLOTAROUTE_RE = re.compile(r"plotaroute\.com/route/(\d+)", re.I)
 DIRECT_GPX_RE = re.compile(r"\.gpx(\?.*)?$", re.I)
+
+def make_https(u: str) -> str:
+    u = u.strip()
+    if not u:
+        return u
+    parsed = urllib.parse.urlparse(u)
+    if not parsed.scheme:
+        u = "https://" + u
+    return u
+
+def normalize_url(link_type: str, url: str, source_id: str) -> str:
+    lt = (link_type or "").strip().lower()
+    url = (url or "").strip()
+    sid = (source_id or "").strip()
+
+    # If URL is just an ID, build a full URL
+    if url.isdigit() and not sid:
+        sid = url
+        url = ""
+
+    if lt in ["strava route", "strava"] or STRAVA_ROUTE_RE.search(url) or (lt.startswith("strava") and sid.isdigit()):
+        if not url or url.isdigit():
+            url = f"https://www.strava.com/routes/{sid}"
+        return make_https(url)
+
+    if lt in ["strava activity"] or STRAVA_ACTIVITY_RE.search(url) or ("activity" in lt and sid.isdigit()):
+        if not url or url.isdigit():
+            url = f"https://www.strava.com/activities/{sid}"
+        return make_https(url)
+
+    if lt in ["plotaroute"] or PLOTAROUTE_RE.search(url) or ("plotaroute" in lt and sid.isdigit()):
+        if not url or url.isdigit():
+            url = f"https://www.plotaroute.com/route/{sid}"
+        return make_https(url)
+
+    if lt in ["gpx"] or DIRECT_GPX_RE.search(url):
+        return make_https(url)
+
+    return make_https(url)
 
 def parse_link(link_type: str, url: str) -> LinkInfo:
     lt = (link_type or "").strip().lower()
@@ -107,28 +134,63 @@ def parse_link(link_type: str, url: str) -> LinkInfo:
         return LinkInfo("Plotaroute", url, sid, False)
     if lt in ["gpx"] or DIRECT_GPX_RE.search(url):
         return LinkInfo("GPX", url, "", True)
-    return LinkInfo(link_type or "Unknown", url, sid, DIRECT_GPX_RE.search(url) is not None)
+    return LinkInfo(link_type or "Unknown", url, "", DIRECT_GPX_RE.search(url) is not None)
 
-def head_status(url: str, timeout=12):
+# -----------------------------
+# Robust HTTP check
+# -----------------------------
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+def check_url(u: str, timeout=15):
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": UA, "Accept": "*/*"})
+    result = {"ok": False, "status": None, "final_url": "", "content_type": "", "error": ""}
+
     try:
-        r = requests.head(url, allow_redirects=True, timeout=timeout)
-        status = r.status_code; final_url = r.url; ct = r.headers.get("Content-Type","")
-        if status >= 400 or status == 405 or not ct:
-            r2 = requests.get(url, stream=True, allow_redirects=True, timeout=timeout)
-            status = r2.status_code; final_url = r2.url; ct = r2.headers.get("Content-Type",""); r2.close()
-        return {"ok": 200 <= status < 400, "status": status, "final_url": final_url, "content_type": ct}
+        # Try HEAD first
+        r = sess.head(u, allow_redirects=True, timeout=timeout)
+        result.update({"status": r.status_code, "final_url": r.url, "content_type": r.headers.get("Content-Type","")})
+        if 200 <= r.status_code < 400 and result["content_type"]:
+            result["ok"] = True
+            return result
+        # Fallback to GET (stream)
+        r2 = sess.get(u, stream=True, allow_redirects=True, timeout=timeout)
+        result.update({"status": r2.status_code, "final_url": r2.url, "content_type": r2.headers.get("Content-Type","")})
+        if 200 <= r2.status_code < 400:
+            result["ok"] = True
+            r2.close()
+            return result
+        # Final fallback GET full
+        r3 = sess.get(u, allow_redirects=True, timeout=timeout)
+        result.update({"status": r3.status_code, "final_url": r3.url, "content_type": r3.headers.get("Content-Type","")})
+        if 200 <= r3.status_code < 400:
+            result["ok"] = True
+        return result
     except Exception as e:
-        return {"ok": False, "status": None, "final_url": "", "content_type": "", "error": str(e)}
+        result["error"] = str(e)
+        return result
 
-def classify_access(host: str, info: dict) -> str:
-    if not info.get("ok"): return "Broken/Unreachable"
+def classify_access(u: str, info: dict) -> str:
+    if not info.get("ok"):
+        if info.get("status") == 429:
+            return "Rate-limited (try again)"
+        return "Broken/Unreachable"
     final = (info.get("final_url") or "").lower()
-    if "strava.com/login" in final or "strava.com/session" in final: return "Needs Auth/Not Public"
-    if "plotaroute.com" in host and info.get("status") in (401,403): return "Not Public"
+    # Login redirects / private
+    if "strava.com/login" in final or "strava.com/session" in final:
+        return "Needs Auth/Not Public"
+    if "private" in final:
+        return "Not Public"
+    # Content-type heuristics
+    ct = (info.get("content_type") or "").lower()
+    if "text/html" in ct or "text/plain" in ct or "application/xml" in ct or "application/gpx" in ct:
+        return "OK"
+    # default ok
     return "OK"
 
 # -----------------------------
-# UI: load data
+# Load UI
 # -----------------------------
 mode = st.radio("Load from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
@@ -136,23 +198,25 @@ dfs = None
 if mode == "Google Sheet (CSV)":
     gs_url = st.text_input("Google Sheet URL")
     if gs_url:
-        dfs = load_from_google_csv(gs_url)
+        try:
+            dfs = load_from_google_csv(gs_url)
+        except Exception as e:
+            st.error(f"Could not read Google Sheet: {e}")
 elif mode == "Upload Excel (.xlsx)":
     up = st.file_uploader("Upload master Excel (.xlsx)", type=["xlsx"])
     if up is not None:
-        dfs = load_from_excel_bytes(up.read())
+        try:
+            dfs = load_from_excel_bytes(up.read())
+        except Exception as e:
+            st.error(f"Could not read Excel: {e}")
 
 if not dfs or "Schedule" not in dfs:
-    st.error("Could not load a 'Schedule' tab from your source. Please verify the tab exists and is shared.")
+    st.error("Could not load a 'Schedule' tab. Please verify.")
     st.stop()
 
 sched = dfs["Schedule"]
-rm = dfs.get("Route Master", pd.DataFrame())  # optional
 
-# -----------------------------
-# Build a long table of links from Schedule (Route 1 & 2)
-# -----------------------------
-# Detect the relevant columns by pattern, so minor header variations don't break it
+# Build links from Schedule
 cols = {c: norm_header(c) for c in sched.columns}
 def find_col(targets):
     for c, n in cols.items():
@@ -165,11 +229,10 @@ date_col = find_col(["date", "datethu"])
 r_names = [find_col(["route1name"]), find_col(["route2name"])]
 r_types = [find_col(["route1routelinktype", "route1linktype"]), find_col(["route2routelinktype", "route2linktype"])]
 r_urls  = [find_col(["route1routelinksourceurl", "route1routelink", "route1url"]), find_col(["route2routelinksourceurl", "route2routelink", "route2url"])]
+r_srcid = [find_col(["route1sourceid", "route1id"]), find_col(["route2sourceid", "route2id"])]
 
 if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
-    st.error("Schedule is missing expected columns for route names/link types/URLs. "
-             "Expected something like: 'Route 1 - Name', 'Route 1 - Route Link Type', "
-             "'Route 1 - Route Link (Source URL)' and the Route 2 equivalents.")
+    st.error("Schedule is missing expected columns for route names/link types/URLs.")
     st.stop()
 
 long_rows = []
@@ -179,20 +242,19 @@ for _, row in sched.iterrows():
         nm = clean(row[r_names[i]])
         lt = clean(row[r_types[i]])
         url = clean(row[r_urls[i]])
+        sid = clean(row[r_srcid[i]]) if r_srcid[i] else ""
         if not nm or nm.lower() == "no run":
             continue
-        long_rows.append({"Date": d, "Route Name": nm, "Link Type": lt, "URL": url, "Side": side})
+        url_norm = normalize_url(lt, url, sid)
+        long_rows.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url_norm, "Source ID": sid})
 
 links_df = pd.DataFrame(long_rows)
 if links_df.empty:
-    st.warning("No route links found in the Schedule.")
-    st.stop()
+    st.warning("No route links found in the Schedule."); st.stop()
 
 st.write(f"Found {len(links_df)} route link entries from the Schedule.")
 
-# -----------------------------
-# Validate links
-# -----------------------------
+# Validate links (with UA + fallbacks)
 st.subheader("Validate Links")
 sample_limit = st.slider("Limit rows to validate", min_value=10, max_value=links_df.shape[0], value=min(200, links_df.shape[0]), step=10)
 
@@ -201,34 +263,34 @@ rows = []
 for _, r in subset.iterrows():
     name = clean(r["Route Name"]); url = clean(r["URL"]); ltype = clean(r["Link Type"])
     if not url:
-        rows.append({"Date": r["Date"], "Route Name": name, "Side": r["Side"], "Link Type": ltype or "Unknown", "URL": "", "Status": "Missing URL", "HTTP": "", "Content-Type": "", "Source ID": ""})
+        rows.append({"Date": r["Date"], "Route Name": name, "Side": r["Side"], "Link Type": ltype or "Unknown", "URL": "", "Status": "Missing URL", "HTTP": "", "Content-Type": "", "Final URL": "", "Source ID": r["Source ID"]})
         continue
-    li = parse_link(ltype, url)
-    info = head_status(li.url)
-    status = classify_access(urllib.parse.urlparse(li.url).netloc, info)
+    info = check_url(url)
+    status = classify_access(url, info)
     rows.append({
         "Date": r["Date"],
         "Route Name": name,
         "Side": r["Side"],
-        "Link Type": li.link_type,
-        "URL": li.url,
+        "Link Type": ltype or "Unknown",
+        "URL": url,
         "Status": status,
         "HTTP": info.get("status"),
         "Content-Type": info.get("content_type"),
-        "Source ID": li.source_id
+        "Final URL": info.get("final_url"),
+        "Source ID": r["Source ID"]
     })
+    # be polite to servers
+    time.sleep(0.2)
 
 report_df = pd.DataFrame(rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
-# -----------------------------
 # GPX download for direct links
-# -----------------------------
 st.subheader("Fetch GPX (direct .gpx links only)")
 gpx_candidates = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if gpx_candidates.empty:
-    st.caption("No direct .gpx links detected in the validated rows. Public Strava/Plotaroute can be validated, GPX export needs OAuth unless you have direct URLs.")
+    st.caption("No direct .gpx links detected in the validated rows. Public Strava/Plotaroute can be validated; GPX export for Strava pages needs OAuth unless you have direct GPX URLs.")
 else:
     pick = st.multiselect("Select routes to download GPX", gpx_candidates["Route Name"].tolist())
     if st.button("Download selected GPX"):
