@@ -4,8 +4,6 @@ import io, re, urllib.parse, pandas as pd, streamlit as st
 import streamlit as st, requests
 
 def capture_strava_token_from_query():
-    """If the URL contains ?code=... from Strava and we don't yet have a token,
-    exchange it here so any page can complete OAuth."""
     if st.session_state.get("strava_token"):
         return
     code = st.query_params.get("code")
@@ -29,7 +27,6 @@ def capture_strava_token_from_query():
         data = resp.json()
         st.session_state["strava_token"] = data.get("access_token")
         st.session_state["strava_athlete"] = data.get("athlete", {})
-        # Remove ?code from URL so refreshes don't re-exchange
         qp = dict(st.query_params)
         if "code" in qp:
             del qp["code"]
@@ -42,8 +39,6 @@ def capture_strava_token_from_query():
 
 st.set_page_config(page_title="Club Schedule", page_icon="🏃", layout="wide")
 st.title("🏃 Club Schedule — Review & Checks")
-
-# Capture token if redirected here after OAuth
 capture_strava_token_from_query()
 
 def extract_sheet_id(url):

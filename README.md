@@ -1,5 +1,5 @@
-# Running Club App (Strava-ready)
+# Running Club App — Strava API validation
 
-- Token auto-capture on any page via query params
-- Strava routes marked 'Needs Auth/Not Public' when not connected
-- GPX export via Strava API when connected
+- Validates Strava ROUTE links via Strava API when connected
+- Marks unauthenticated Strava links as 'Needs Auth/Not Public' instead of 'Broken'
+- Export GPX via /routes/{id}/export_gpx
