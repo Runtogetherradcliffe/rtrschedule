@@ -1,5 +1,5 @@
 # pages/club_route_links.py
-# Build: v2025.08.15-STRAVA-IDFIX-4 (reconcile short vs long Strava IDs)
+# Build: v2025.08.15-STRAVA-IDFIX-5 (reconcile short vs long Strava IDs; syntax-fixed)
 
 import io
 import re
@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BUILD_ID = "v2025.08.15-STRAVA-IDFIX-4"
+BUILD_ID = "v2025.08.15-STRAVA-IDFIX-5"
 
 def capture_strava_token_from_query():
     if st.session_state.get("strava_token"):
@@ -70,14 +70,17 @@ def load_google_sheet_csv(sheet_id, sheet_name):
     return df
 
 def load_from_google_csv(url):
-    sid = extract_sheet_id(url); dfs = {}
+    sid = extract_sheet_id(url)
+    dfs = {}
     if sid:
         df = load_google_sheet_csv(sid, "Schedule")
-        if not df.empty: dfs["Schedule"] = df
+        if not df.empty:
+            dfs["Schedule"] = df
     return dfs
 
 def load_from_excel_bytes(bts):
-    xls = pd.ExcelFile(io.BytesIO(bts)); dfs = {}
+    xls = pd.ExcelFile(io.BytesIO(bts))
+    dfs = {}
     if "Schedule" in xls.sheet_names:
         dfs["Schedule"] = pd.read_excel(xls, "Schedule", dtype=str)
     return dfs
@@ -111,7 +114,8 @@ def try_get_public(u, timeout=15):
 STRAVA_ROUTE_ID_RE = re.compile(r"(?:^|/)(?:routes|routes/view)/(\d+)(?:[/?#].*)?$", re.I)
 
 def is_strava_route_url(u: str) -> bool:
-    if not u: return False
+    if not u:
+        return False
     lu = u.lower()
     return ("strava.com" in lu) and ("/routes/" in lu)
 
@@ -120,14 +124,12 @@ def extract_digits(s: str) -> str:
 
 def extract_route_id(u: str, source_id: str) -> str:
     m = STRAVA_ROUTE_ID_RE.search(u or "")
-    if m: return m.group(1)
+    if m:
+        return m.group(1)
     sid = extract_digits(source_id)
     return sid
 
-# --- NEW: reconcile short vs long route IDs ---
-def reconcile_route_url(url: str, source_id: str) -> (str, dict):
-    """If URL contains a short route id but Source ID has a longer numeric id,
-    rebuild the URL with the longer id. Returns (url, dbg)."""
+def reconcile_route_url(url: str, source_id: str):
     dbg = {}
     rid_from_url = extract_route_id(url, "")
     rid_from_src = extract_digits(source_id)
@@ -135,7 +137,6 @@ def reconcile_route_url(url: str, source_id: str) -> (str, dict):
         dbg["rid_from_url"] = rid_from_url
     if rid_from_src:
         dbg["rid_from_source"] = rid_from_src
-    # Consider "long" as >= 12 digits (new Strava route IDs can be ~19 digits)
     if rid_from_url and rid_from_src and len(rid_from_src) >= 12 and len(rid_from_url) < len(rid_from_src):
         url = f"https://www.strava.com/routes/{rid_from_src}"
         dbg["url_rebuilt_from_source"] = url
@@ -166,14 +167,17 @@ dfs = None
 if mode.startswith("Google"):
     url = st.text_input("Google Sheet URL")
     if url:
-        try: dfs = load_from_google_csv(url)
-        except Exception as e: st.error(f"Could not read Google Sheet: {e}")
+        try:
+            dfs = load_from_google_csv(url)
+        except Exception as e:
+            st.error(f"Could not read Google Sheet: {e}")
 else:
-    up = st.file_uploader("Upload master Excel (.xlsx)", type=["xlsx"]
-    )
+    up = st.file_uploader("Upload master Excel (.xlsx)", type=["xlsx"])
     if up:
-        try: dfs = load_from_excel_bytes(up.read())
-        except Exception as e: st.error(f"Could not read Excel: {e}")
+        try:
+            dfs = load_from_excel_bytes(up.read())
+        except Exception as e:
+            st.error(f"Could not read Excel: {e}")
 
 if not dfs or "Schedule" not in dfs:
     st.error("Could not load a 'Schedule' tab.")
@@ -195,6 +199,7 @@ r_names = [find_col(["route1name"]), find_col(["route2name"])]
 r_types = [find_col(["route1routelinktype","route1linktype"]), find_col(["route2routelinktype","route2linktype"])]
 r_urls  = [find_col(["route1routelinksourceurl","route1routelink","route1url"]), find_col(["route2routelinksourceurl","route2routelink","route2url"])]
 r_srcid = [find_col(["route1sourceid","route1id"]), find_col(["route2sourceid","route2id"])]
+
 if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
     st.error("Schedule is missing expected columns for route names/link types/URLs.")
     st.stop()
@@ -210,12 +215,10 @@ for _, row in sched.iterrows():
         if not nm or nm.lower() == "no run":
             continue
         url = make_https(url_raw)
-        # If URL is missing/placeholder and Link Type says Strava and Source ID has digits => synth
         if (not url) and lt.lower().startswith("strava"):
             rid_guess = extract_digits(sid_raw)
             if len(rid_guess) >= 12:
                 url = f"https://www.strava.com/routes/{rid_guess}"
-        # Reconcile short vs long
         if url and is_strava_route_url(url):
             url, _ = reconcile_route_url(url, sid_raw)
         rows_long.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Source ID": sid_raw})
@@ -241,14 +244,11 @@ for idx, r in subset.iterrows():
         row_debug["link_type"] = lt
         row_debug["source_id_raw"] = sid_raw
 
-    # Reconcile again at validation time in case only Source ID is reliable
     if is_strava_route_url(u):
         u2, dbg2 = reconcile_route_url(u, sid_raw)
         if u2 != u:
-            if debug and len(out_rows) < 5:
-                row_debug.update(dbg2)
             u = u2
-        elif debug and len(out_rows) < 5:
+        if debug and len(out_rows) < 5:
             row_debug.update(dbg2)
 
     if not u and lt.lower().startswith("strava"):
@@ -283,7 +283,6 @@ st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
 st.subheader("Export GPX")
-# Direct GPX
 gpx_ok = report_df[(report_df["Status"].str.contains("OK")) & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if not gpx_ok.empty:
     pick = st.multiselect("Select direct-GPX routes to download", gpx_ok["Route Name"].tolist(), key="pick_gpx_direct")
@@ -293,8 +292,9 @@ if not gpx_ok.empty:
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for _, row in gpx_ok[gpx_ok["Route Name"].isin(pick)].iterrows():
                 try:
-                    resp = requests.get(row["URL"], timeout=20); resp.raise_for_status()
-                    base = urllib.parse.urlparse(row["URL"]).path.split("/")[-1] or "route.gpx")
+                    resp = requests.get(row["URL"], timeout=20)
+                    resp.raise_for_status()
+                    base = urllib.parse.urlparse(row["URL"]).path.split("/")[-1] or "route.gpx"
                     zf.writestr(f"{row['Route Name'][:50].replace('/', '-')}-{base}", resp.content)
                 except Exception as e:
                     st.warning(f"Failed to download {row['Route Name']}: {e}")
