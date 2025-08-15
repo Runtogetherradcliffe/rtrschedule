@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
-st.title("🗺️ Route Links & GPX — Validate & Fetch (robust tabs/columns)")
+st.title("🗺️ Route Links & GPX — Validate & Fetch (Schedule-aware)")
 
 # -----------------------------
 # Helpers
@@ -35,6 +35,7 @@ def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
 def load_from_google_csv(url: str):
     sheet_id = extract_sheet_id(url)
     dfs = {}
+    # Try multiple names for Route Master; it's optional now
     for tab in ["Route Master", "RouteMaster", "Routemaster"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
@@ -43,28 +44,34 @@ def load_from_google_csv(url: str):
                 break
         except Exception:
             continue
-    # Optional
-    for tab in ["Schedule", "Config"]:
+    # Schedule is now PRIMARY source
+    for tab in ["Schedule"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
             if not df.empty:
-                dfs[tab] = df
+                dfs["Schedule"] = df
         except Exception:
             pass
     return dfs
 
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
+    dfs = {}
+    # Optional route master
     rm_name = None
     for name in xls.sheet_names:
         if name.lower().replace(" ", "") in {"routemaster", "route_master"}:
             rm_name = name; break
-    if rm_name is None:
-        rm_name = "Route Master" if "Route Master" in xls.sheet_names else "RouteMaster"
-    dfs = {"Route Master": pd.read_excel(xls, rm_name)}
-    for opt in ["Schedule", "Config"]:
-        if opt in xls.sheet_names:
-            dfs[opt] = pd.read_excel(xls, opt)
+    if rm_name is not None:
+        dfs["Route Master"] = pd.read_excel(xls, rm_name)
+    # Schedule
+    if "Schedule" in xls.sheet_names:
+        dfs["Schedule"] = pd.read_excel(xls, "Schedule")
+    else:
+        # Try a loose match
+        for name in xls.sheet_names:
+            if name.lower().startswith("sched"):
+                dfs["Schedule"] = pd.read_excel(xls, name); break
     return dfs
 
 # -----------------------------
@@ -123,7 +130,7 @@ def classify_access(host: str, info: dict) -> str:
 # -----------------------------
 # UI: load data
 # -----------------------------
-mode = st.radio("Load Route Master from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
+mode = st.radio("Load from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
 dfs = None
 if mode == "Google Sheet (CSV)":
@@ -135,55 +142,74 @@ elif mode == "Upload Excel (.xlsx)":
     if up is not None:
         dfs = load_from_excel_bytes(up.read())
 
-if not dfs or "Route Master" not in dfs:
-    st.error("Could not load a 'Route Master' tab. Accepted tab names: Route Master, RouteMaster, Routemaster.")
+if not dfs or "Schedule" not in dfs:
+    st.error("Could not load a 'Schedule' tab from your source. Please verify the tab exists and is shared.")
     st.stop()
 
-rm = dfs["Route Master"]
-if rm.empty:
-    st.error("Route Master tab is empty."); st.stop()
+sched = dfs["Schedule"]
+rm = dfs.get("Route Master", pd.DataFrame())  # optional
 
-# Flexible column detection
-headers = list(rm.columns)
-norm_map = {h: norm_header(h) for h in headers}
-
+# -----------------------------
+# Build a long table of links from Schedule (Route 1 & 2)
+# -----------------------------
+# Detect the relevant columns by pattern, so minor header variations don't break it
+cols = {c: norm_header(c) for c in sched.columns}
 def find_col(targets):
-    for h in headers:
-        nh = norm_map[h]
+    for c, n in cols.items():
         for t in targets:
-            if t in nh:
-                return h
+            if t in n:
+                return c
     return None
 
-COL_NAME = find_col(["routename"])
-COL_LINK_TYPE = find_col(["routelinktype"])
-# ensure URL col prefers source url over type
-COL_LINK = find_col(["routelinksourceurl", "routelink", "url"])
+date_col = find_col(["date", "datethu"])
+r_names = [find_col(["route1name"]), find_col(["route2name"])]
+r_types = [find_col(["route1routelinktype", "route1linktype"]), find_col(["route2routelinktype", "route2linktype"])]
+r_urls  = [find_col(["route1routelinksourceurl", "route1routelink", "route1url"]), find_col(["route2routelinksourceurl", "route2routelink", "route2url"])]
 
-if not COL_NAME or not COL_LINK_TYPE or not COL_LINK:
-    st.error("Missing required columns. Detected headers: " + ", ".join(str(h) for h in headers))
+if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
+    st.error("Schedule is missing expected columns for route names/link types/URLs. "
+             "Expected something like: 'Route 1 - Name', 'Route 1 - Route Link Type', "
+             "'Route 1 - Route Link (Source URL)' and the Route 2 equivalents.")
     st.stop()
 
-st.caption(f"Using columns → Name: '{COL_NAME}', Link Type: '{COL_LINK_TYPE}', URL: '{COL_LINK}'")
+long_rows = []
+for _, row in sched.iterrows():
+    d = row[date_col]
+    for i, side in enumerate(["1","2"]):
+        nm = clean(row[r_names[i]])
+        lt = clean(row[r_types[i]])
+        url = clean(row[r_urls[i]])
+        if not nm or nm.lower() == "no run":
+            continue
+        long_rows.append({"Date": d, "Route Name": nm, "Link Type": lt, "URL": url, "Side": side})
 
+links_df = pd.DataFrame(long_rows)
+if links_df.empty:
+    st.warning("No route links found in the Schedule.")
+    st.stop()
+
+st.write(f"Found {len(links_df)} route link entries from the Schedule.")
+
+# -----------------------------
 # Validate links
+# -----------------------------
 st.subheader("Validate Links")
-sample_limit = st.slider("Limit rows to validate", min_value=10, max_value=rm.shape[0], value=min(200, rm.shape[0]), step=10)
+sample_limit = st.slider("Limit rows to validate", min_value=10, max_value=links_df.shape[0], value=min(200, links_df.shape[0]), step=10)
 
-subset = rm.head(sample_limit).copy()
+subset = links_df.head(sample_limit).copy()
 rows = []
 for _, r in subset.iterrows():
-    name = clean(r[COL_NAME])
-    ltype = clean(r[COL_LINK_TYPE])
-    url = clean(r[COL_LINK])
+    name = clean(r["Route Name"]); url = clean(r["URL"]); ltype = clean(r["Link Type"])
     if not url:
-        rows.append({"Route Name": name, "Link Type": ltype or "Unknown", "URL": "", "Status": "Missing URL", "HTTP": "", "Content-Type": "", "Source ID": ""})
+        rows.append({"Date": r["Date"], "Route Name": name, "Side": r["Side"], "Link Type": ltype or "Unknown", "URL": "", "Status": "Missing URL", "HTTP": "", "Content-Type": "", "Source ID": ""})
         continue
     li = parse_link(ltype, url)
     info = head_status(li.url)
     status = classify_access(urllib.parse.urlparse(li.url).netloc, info)
     rows.append({
+        "Date": r["Date"],
         "Route Name": name,
+        "Side": r["Side"],
         "Link Type": li.link_type,
         "URL": li.url,
         "Status": status,
@@ -192,11 +218,13 @@ for _, r in subset.iterrows():
         "Source ID": li.source_id
     })
 
-report_df = pd.DataFrame(rows)
+report_df = pd.DataFrame(rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
+# -----------------------------
 # GPX download for direct links
+# -----------------------------
 st.subheader("Fetch GPX (direct .gpx links only)")
 gpx_candidates = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if gpx_candidates.empty:
