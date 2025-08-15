@@ -3,27 +3,22 @@ import io
 import re
 import urllib.parse
 from dataclasses import dataclass
-from typing import Dict, List, Optional
-
 import pandas as pd
 import requests
 import streamlit as st
 
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
-st.title("🗺️ Route Links & GPX — Validate & Fetch")
+st.title("🗺️ Route Links & GPX — Validate & Fetch (robust tabs/columns)")
 
-# --------------------------------------------------
-# Utilities shared with your other page
-# --------------------------------------------------
-def cfg_value(df_cfg: pd.DataFrame, key: str, default=None):
-    if df_cfg is None or df_cfg.empty:
-        return default
-    row = df_cfg.loc[df_cfg["Setting"] == key, "Value"]
-    return row.values[0] if not row.empty else default
-
+# -----------------------------
+# Helpers
+# -----------------------------
 def clean(x):
     if pd.isna(x): return ""
     return str(x).strip()
+
+def norm_header(h):
+    return re.sub(r"[^a-z0-9]+", "", str(h).strip().lower())
 
 def extract_sheet_id(url: str):
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
@@ -39,31 +34,42 @@ def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
 
 def load_from_google_csv(url: str):
     sheet_id = extract_sheet_id(url)
-    required_tabs = ["Route Master"]
     dfs = {}
-    for tab in required_tabs:
-        df = load_google_sheet_csv(sheet_id, tab)
-        dfs[tab] = df
-    # Optional schedule/config if present
+    for tab in ["Route Master", "RouteMaster", "Routemaster"]:
+        try:
+            df = load_google_sheet_csv(sheet_id, tab)
+            if not df.empty:
+                dfs["Route Master"] = df
+                break
+        except Exception:
+            continue
+    # Optional
     for tab in ["Schedule", "Config"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
-            dfs[tab] = df
+            if not df.empty:
+                dfs[tab] = df
         except Exception:
             pass
     return dfs
 
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
-    dfs = {"Route Master": pd.read_excel(xls, "Route Master") if "Route Master" in xls.sheet_names else pd.read_excel(xls, "RouteMaster")}
+    rm_name = None
+    for name in xls.sheet_names:
+        if name.lower().replace(" ", "") in {"routemaster", "route_master"}:
+            rm_name = name; break
+    if rm_name is None:
+        rm_name = "Route Master" if "Route Master" in xls.sheet_names else "RouteMaster"
+    dfs = {"Route Master": pd.read_excel(xls, rm_name)}
     for opt in ["Schedule", "Config"]:
         if opt in xls.sheet_names:
             dfs[opt] = pd.read_excel(xls, opt)
     return dfs
 
-# --------------------------------------------------
-# Link detection / patterns
-# --------------------------------------------------
+# -----------------------------
+# Link parsing
+# -----------------------------
 @dataclass
 class LinkInfo:
     link_type: str
@@ -92,85 +98,77 @@ def parse_link(link_type: str, url: str) -> LinkInfo:
         m = PLOTAROUTE_RE.search(url)
         if m: sid = m.group(1)
         return LinkInfo("Plotaroute", url, sid, False)
-    # Direct GPX
     if lt in ["gpx"] or DIRECT_GPX_RE.search(url):
         return LinkInfo("GPX", url, "", True)
-    # Fallback
     return LinkInfo(link_type or "Unknown", url, sid, DIRECT_GPX_RE.search(url) is not None)
 
-def head_status(url: str, timeout=12) -> Dict:
+def head_status(url: str, timeout=12):
     try:
         r = requests.head(url, allow_redirects=True, timeout=timeout)
-        status = r.status_code
-        final_url = r.url
-        ct = r.headers.get("Content-Type", "")
-        # Some hosts block HEAD; try GET with stream to check headers
+        status = r.status_code; final_url = r.url; ct = r.headers.get("Content-Type","")
         if status >= 400 or status == 405 or not ct:
             r2 = requests.get(url, stream=True, allow_redirects=True, timeout=timeout)
-            status = r2.status_code
-            final_url = r2.url
-            ct = r2.headers.get("Content-Type", "")
-            r2.close()
+            status = r2.status_code; final_url = r2.url; ct = r2.headers.get("Content-Type",""); r2.close()
         return {"ok": 200 <= status < 400, "status": status, "final_url": final_url, "content_type": ct}
     except Exception as e:
         return {"ok": False, "status": None, "final_url": "", "content_type": "", "error": str(e)}
 
-def classify_access(host: str, info: Dict) -> str:
-    if not info.get("ok"):
-        return "Broken/Unreachable"
+def classify_access(host: str, info: dict) -> str:
+    if not info.get("ok"): return "Broken/Unreachable"
     final = (info.get("final_url") or "").lower()
-    # Common login redirects
-    if "strava.com/login" in final or "strava.com/session" in final:
-        return "Needs Auth/Not Public"
-    if "plotaroute.com" in host and info.get("status") in (401, 403):
-        return "Not Public"
+    if "strava.com/login" in final or "strava.com/session" in final: return "Needs Auth/Not Public"
+    if "plotaroute.com" in host and info.get("status") in (401,403): return "Not Public"
     return "OK"
 
-# --------------------------------------------------
-# UI: Load data
-# --------------------------------------------------
+# -----------------------------
+# UI: load data
+# -----------------------------
 mode = st.radio("Load Route Master from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
 dfs = None
 if mode == "Google Sheet (CSV)":
-    gs_url = st.text_input("Google Sheet URL (must include a 'Route Master' tab)")
+    gs_url = st.text_input("Google Sheet URL")
     if gs_url:
-        try:
-            dfs = load_from_google_csv(gs_url)
-        except Exception as e:
-            st.error(f"Could not read Google Sheet: {e}")
+        dfs = load_from_google_csv(gs_url)
 elif mode == "Upload Excel (.xlsx)":
-    up = st.file_uploader("Upload your master file (.xlsx)", type=["xlsx"])
+    up = st.file_uploader("Upload master Excel (.xlsx)", type=["xlsx"])
     if up is not None:
-        try:
-            dfs = load_from_excel_bytes(up.read())
-        except Exception as e:
-            st.error(f"Could not read Excel file: {e}")
+        dfs = load_from_excel_bytes(up.read())
 
-if not dfs:
+if not dfs or "Route Master" not in dfs:
+    st.error("Could not load a 'Route Master' tab. Accepted tab names: Route Master, RouteMaster, Routemaster.")
     st.stop()
 
-rm = dfs.get("Route Master", pd.DataFrame())
+rm = dfs["Route Master"]
 if rm.empty:
-    st.error("Route Master tab is empty or missing.")
+    st.error("Route Master tab is empty."); st.stop()
+
+# Flexible column detection
+headers = list(rm.columns)
+norm_map = {h: norm_header(h) for h in headers}
+
+def find_col(targets):
+    for h in headers:
+        nh = norm_map[h]
+        for t in targets:
+            if t in nh:
+                return h
+    return None
+
+COL_NAME = find_col(["routename"])
+COL_LINK_TYPE = find_col(["routelinktype"])
+# ensure URL col prefers source url over type
+COL_LINK = find_col(["routelinksourceurl", "routelink", "url"])
+
+if not COL_NAME or not COL_LINK_TYPE or not COL_LINK:
+    st.error("Missing required columns. Detected headers: " + ", ".join(str(h) for h in headers))
     st.stop()
 
-# Column names (tolerate variations)
-COL_LINK_TYPE = next((c for c in rm.columns if "Route Link Type" in c), None)
-COL_LINK = next((c for c in rm.columns if "Route Link" in c and "Type" not in c), None)
-COL_NAME = next((c for c in rm.columns if c.strip().lower() == "route name"), None)
+st.caption(f"Using columns → Name: '{COL_NAME}', Link Type: '{COL_LINK_TYPE}', URL: '{COL_LINK}'")
 
-if not all([COL_LINK_TYPE, COL_LINK, COL_NAME]):
-    st.error("Missing required columns in Route Master: 'Route Name', 'Route Link Type', 'Route Link (Source URL)'")
-    st.stop()
-
-st.caption("Tip: Works with Strava Route/Activity, Plotaroute, and direct GPX links. Strava GPX fetch requires OAuth (not enabled here) but we can still validate public visibility.")
-
-# --------------------------------------------------
 # Validate links
-# --------------------------------------------------
 st.subheader("Validate Links")
-sample_limit = st.slider("Limit rows to validate (for speed)", min_value=10, max_value=rm.shape[0], value=min(200, rm.shape[0]), step=10)
+sample_limit = st.slider("Limit rows to validate", min_value=10, max_value=rm.shape[0], value=min(200, rm.shape[0]), step=10)
 
 subset = rm.head(sample_limit).copy()
 rows = []
@@ -198,14 +196,11 @@ report_df = pd.DataFrame(rows)
 st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
-# --------------------------------------------------
-# Basic GPX fetch (no OAuth)
-# --------------------------------------------------
+# GPX download for direct links
 st.subheader("Fetch GPX (direct .gpx links only)")
-
 gpx_candidates = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if gpx_candidates.empty:
-    st.caption("No direct .gpx links detected in the validated rows. You can still copy GPX from Strava/Plotaroute manually or enable OAuth later.")
+    st.caption("No direct .gpx links detected in the validated rows. Public Strava/Plotaroute can be validated, GPX export needs OAuth unless you have direct URLs.")
 else:
     pick = st.multiselect("Select routes to download GPX", gpx_candidates["Route Name"].tolist())
     if st.button("Download selected GPX"):
@@ -215,16 +210,10 @@ else:
             for _, row in gpx_candidates[gpx_candidates["Route Name"].isin(pick)].iterrows():
                 url = row["URL"]
                 try:
-                    resp = requests.get(url, timeout=20)
-                    resp.raise_for_status()
-                    # Make a safe filename
-                    parsed = urllib.parse.urlparse(url)
-                    base = parsed.path.split("/")[-1] or "route.gpx"
+                    resp = requests.get(url, timeout=20); resp.raise_for_status()
+                    base = urllib.parse.urlparse(url).path.split("/")[-1] or "route.gpx"
                     fname = f"{row['Route Name'][:50].replace('/', '-')}-{base}"
                     zf.writestr(fname, resp.content)
                 except Exception as e:
                     st.warning(f"Failed to download {row['Route Name']}: {e}")
         st.download_button("⬇️ Download GPX ZIP", data=zip_buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
-
-st.divider()
-st.caption("For Strava Routes/Activities and Plotaroute, full automatic GPX export usually needs API OAuth and/or public routes. If you want, we can add Strava OAuth next so the app can fetch GPX for private routes you have access to.")
