@@ -1,5 +1,5 @@
 # pages/club_route_links.py
-# Build: v2025.08.15-STRAVA-IDFIX-7 (URL-first + scientific-notation ID expansion)
+# Build: v2025.08.15-STRAVA-IDFIX-9 (fix NameError in GPX export + progress; keep rate-limit handling)
 
 import io
 import re
@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BUILD_ID = "v2025.08.15-STRAVA-IDFIX-7"
+BUILD_ID = "v2025.08.15-STRAVA-IDFIX-9"
 
 # --- Capture Strava token from ?code=... on redirect back to this page ---
 def capture_strava_token_from_query():
@@ -36,7 +36,7 @@ def capture_strava_token_from_query():
         data = resp.json()
         st.session_state["strava_token"] = data.get("access_token")
         st.session_state["strava_athlete"] = data.get("athlete", {})
-        # Remove ?code from URL so refreshes don't re-exchange
+        # remove code from URL
         qp = dict(st.query_params)
         if "code" in qp:
             del qp["code"]
@@ -130,14 +130,9 @@ def is_strava_route_url(u: str) -> bool:
     return ("strava.com" in lu) and ("/routes/" in lu)
 
 def extract_digits(s: str) -> str:
-    # Pulls all digits; works for plain text like "3212105058406369490"
     return "".join(re.findall(r"\d+", s or ""))
 
 def expand_sci_id(s: str) -> str:
-    """
-    Expand scientific-notation numeric strings like '3.3357E+18' -> '3335700000000000000'.
-    Returns '' if it doesn't match sci-notation.
-    """
     if not s:
         return ""
     s = s.strip()
@@ -154,11 +149,9 @@ def expand_sci_id(s: str) -> str:
     if zeros_to_add >= 0:
         return digits + ("0" * zeros_to_add)
     else:
-        # exp smaller than frac length (unlikely for route IDs); fall back to plain digits
         return digits
 
 def source_id_to_long_digits(s: str) -> str:
-    """Prefer sci-notation expansion, else fallback to digit-extraction."""
     expanded = expand_sci_id(s)
     if expanded:
         return expanded
@@ -169,7 +162,6 @@ def extract_route_id_from_url(u: str) -> str:
     return m.group(1) if m else ""
 
 def extract_route_id(u: str, source_id: str) -> str:
-    """Prefer ID from URL; else parse Source ID (including sci-notation)."""
     rid = extract_route_id_from_url(u)
     if rid:
         return rid
@@ -177,12 +169,6 @@ def extract_route_id(u: str, source_id: str) -> str:
 
 # --- URL-first reconciliation ---
 def reconcile_route_url(url: str, source_id: str):
-    """
-    Prefer the ID in the URL. Only rebuild the URL if:
-      - URL contains a Strava route id that looks 'short' (<12 digits), AND
-      - Source ID contains a 'long' id (>=12 digits), parsed via sci-notation if needed.
-    Returns (possibly updated url, debug_dict).
-    """
     dbg = {}
     rid_from_url = extract_route_id_from_url(url) if url else ""
     rid_from_src = source_id_to_long_digits(source_id)
@@ -190,8 +176,6 @@ def reconcile_route_url(url: str, source_id: str):
         dbg["rid_from_url"] = rid_from_url
     if rid_from_src:
         dbg["rid_from_source"] = rid_from_src
-
-    # Only rebuild when URL id clearly looks short and source id is clearly long
     if (
         url and rid_from_url and rid_from_src
         and len(rid_from_url) < 12
@@ -199,7 +183,6 @@ def reconcile_route_url(url: str, source_id: str):
     ):
         url = f"https://www.strava.com/routes/{rid_from_src}"
         dbg["url_rebuilt_from_source"] = url
-
     return url, dbg
 
 def strava_route_status_via_api(route_id: str, token: str) -> str:
@@ -217,9 +200,15 @@ def strava_route_status_via_api(route_id: str, token: str) -> str:
             return "Unauthorized (token/scope)"
         if r.status_code == 404:
             return "Not Found/No Access"
+        if r.status_code == 429:
+            return "Rate-limited (429)"
         return f"API error {r.status_code}"
     except Exception as e:
         return f"API error: {e}"
+
+# Simple in-session cache for route status to avoid re-hitting the API
+if "route_api_cache" not in st.session_state:
+    st.session_state["route_api_cache"] = {}
 
 # ---------------------------- Load Data UI ----------------------------------
 mode = st.radio("Load data from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
@@ -296,16 +285,18 @@ debug = st.checkbox("Show debug for first 5 rows", value=True)
 
 # ------------------------------- Validate -----------------------------------
 st.subheader("Validate Links")
-limit = st.slider(
-    "Limit rows to validate", min_value=10, max_value=len(links_df), value=min(200, len(links_df)), step=10
-)
+start_at = st.number_input("Start validating at row (0-based index)", min_value=0, max_value=max(0, len(links_df)-1), value=0, step=1)
+limit = st.slider("Limit rows to validate in this pass", min_value=10, max_value=len(links_df), value=min(60, len(links_df)), step=10)
+rate_delay = st.slider("Delay between API calls (seconds)", min_value=0.0, max_value=1.0, value=0.35, step=0.05, help="Increase if you hit 429s")
 
-subset = links_df.head(limit).copy()
+subset = links_df.iloc[start_at:start_at+limit].copy()
 token = st.session_state.get("strava_token")
 token_present = bool(token)
 
 out_rows = []
-for idx, r in subset.iterrows():
+hit_429 = False
+
+for _, r in subset.iterrows():
     u = clean(r["URL"]); lt = clean(r["Link Type"]); sid_raw = clean(r["Source ID"])
     row_debug = {}
     if debug and len(out_rows) < 5:  # only annotate first 5 rows
@@ -335,12 +326,32 @@ for idx, r in subset.iterrows():
 
     # Prefer Strava API path if connected and URL looks like a Strava route
     if token_present and is_strava_route_url(u):
-        rid = extract_route_id(u, sid_raw)  # prefers URL id, else sci-expanded source id
+        rid = extract_route_id(u, sid_raw)
         if debug and len(out_rows) < 5:
             row_debug["route_id_extracted"] = rid
-        api_status = strava_route_status_via_api(rid, token) if rid else "Missing route id"
-        out_rows.append({**r, "Status": api_status, "HTTP": "", "Content-Type": "", "Final URL": u, "Debug": row_debug if debug else ""})
-        time.sleep(0.05)
+
+        # cache check
+        cache = st.session_state["route_api_cache"]
+        cached = cache.get(rid)
+        if cached:
+            status = cached
+        else:
+            status = strava_route_status_via_api(rid, token)
+            # cache OK and 404; also cache rate-limited this run to avoid hammering
+            if status in ("OK (API)", "Not Found/No Access", "Unauthorized (token/scope)") or status.startswith("API error"):
+                cache[rid] = status
+            if status == "Rate-limited (429)":
+                hit_429 = True
+
+        out_rows.append({**r, "Status": status, "HTTP": "", "Content-Type": "", "Final URL": u, "Debug": row_debug if debug else ""})
+
+        if hit_429:
+            st.warning("Hit Strava rate limit (429). Stop this pass and resume later with a higher delay or smaller batch.")
+            break
+
+        if rate_delay > 0:
+            time.sleep(rate_delay)
+
         continue
 
     # Fallback: public fetch (non-Strava or not connected)
@@ -359,7 +370,8 @@ for idx, r in subset.iterrows():
         "Final URL": info.get("final_url"),
         "Debug": row_debug if debug else ""
     })
-    time.sleep(0.05)
+    if rate_delay > 0:
+        time.sleep(rate_delay)
 
 report_df = pd.DataFrame(out_rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
@@ -392,24 +404,29 @@ if not gpx_ok.empty:
         st.download_button("⬇️ Download GPX ZIP (direct)", data=buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
 
 # Strava via API (works for your own public & private routes; others' public routes too)
-if token_present:
+token = st.session_state.get("strava_token")
+if token:
     strava_routes = report_df[report_df["URL"].str.contains("strava.com") & report_df["URL"].str.contains("/routes/")]
     if not strava_routes.empty:
         st.markdown("#### Strava Routes via API")
         strava_routes = strava_routes.assign(**{"Route ID": strava_routes["URL"].str.extract(r"/routes/(\d+)").astype(str)})
         pick2 = st.multiselect("Select Strava Routes to export GPX", strava_routes["Route Name"].tolist(), key="pick_strava")
+        export_delay = st.slider("Delay between Strava GPX downloads (seconds)", min_value=0.0, max_value=1.0, value=0.35, step=0.05)
         if st.button("Export selected Strava GPX") and pick2:
             import zipfile
             buf = io.BytesIO()
+            prog = st.progress(0, text="Exporting GPX via Strava API...")
+            total = len(pick2)
+            done = 0
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for _, row in strava_routes[strra_routes["Route Name"].isin(pick2)].iterrows():
+                for _, row in strava_routes[strava_routes["Route Name"].isin(pick2)].iterrows():
                     rid = row["Route ID"]
                     if not rid:
                         st.warning(f"Missing route id for {row['Route Name']}")
                         continue
                     api_url = f"https://www.strava.com/api/v3/routes/{rid}/export_gpx"
                     try:
-                        resp = requests.get(api_url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+                        resp = requests.get(api_url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
                         if resp.status_code == 200:
                             zf.writestr(f"{row['Route Name'][:50].replace('/', '-')}-{rid}.gpx", resp.content)
                         elif resp.status_code == 401:
@@ -417,10 +434,18 @@ if token_present:
                             break
                         elif resp.status_code == 404:
                             st.warning(f"Route not found or not accessible: {row['Route Name']}")
+                        elif resp.status_code == 429:
+                            st.warning("Hit Strava rate limit while exporting. Try a smaller batch or increase delay.")
+                            break
                         else:
                             st.warning(f"Strava API error {resp.status_code} for {row['Route Name']}")
                     except Exception as e:
                         st.warning(f"Failed to fetch GPX for {row['Route Name']}: {e}")
+                    done += 1
+                    prog.progress(min(done/total, 1.0))
+                    if export_delay > 0:
+                        time.sleep(export_delay)
+            prog.empty()
             st.download_button("⬇️ Download Strava GPX ZIP", data=buf.getvalue(), file_name="routes_strava_gpx.zip", mime="application/zip")
 else:
     st.info("Strava not connected. Open the Strava OAuth page and connect your account to export GPX for Strava routes.")
