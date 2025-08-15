@@ -1,5 +1,5 @@
 # pages/club_route_links.py
-# Build: v2025.08.15-STRAVA-IDFIX-5 (reconcile short vs long Strava IDs; syntax-fixed)
+# Build: v2025.08.15-STRAVA-IDFIX-6 (URL-first, long-ID safe)
 
 import io
 import re
@@ -9,8 +9,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BUILD_ID = "v2025.08.15-STRAVA-IDFIX-5"
+BUILD_ID = "v2025.08.15-STRAVA-IDFIX-6"
 
+# --- Capture Strava token from ?code=... on redirect back to this page ---
 def capture_strava_token_from_query():
     if st.session_state.get("strava_token"):
         return
@@ -35,6 +36,7 @@ def capture_strava_token_from_query():
         data = resp.json()
         st.session_state["strava_token"] = data.get("access_token")
         st.session_state["strava_athlete"] = data.get("athlete", {})
+        # Remove ?code from URL so refreshes don't re-exchange
         qp = dict(st.query_params)
         if "code" in qp:
             del qp["code"]
@@ -51,6 +53,7 @@ st.caption(f"Build: {BUILD_ID}")
 
 capture_strava_token_from_query()
 
+# ----------------------------- Utilities ------------------------------------
 def clean(x):
     return "" if pd.isna(x) else str(x).strip()
 
@@ -62,6 +65,7 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 def load_google_sheet_csv(sheet_id, sheet_name):
+    # dtype=str preserves big numeric IDs; keep_default_na=False stops "NA" -> NaN
     u = (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         "/gviz/tq?tqx=out:csv&sheet=" + urllib.parse.quote(sheet_name, safe="")
@@ -86,6 +90,7 @@ def load_from_excel_bytes(bts):
     return dfs
 
 def make_https(u):
+    """Normalize URL; treat placeholders like 'Strava Route' (or any with spaces) as empty."""
     u = (u or "").strip()
     if not u:
         return u
@@ -95,8 +100,10 @@ def make_https(u):
         return "https://" + u
     return u
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 def try_get_public(u, timeout=15):
     s = requests.Session()
@@ -104,13 +111,16 @@ def try_get_public(u, timeout=15):
     out = {"ok": False, "status": None, "final_url": "", "content_type": "", "error": ""}
     try:
         r = s.get(u, stream=True, allow_redirects=True, timeout=timeout)
-        out.update({"status": r.status_code, "final_url": r.url, "content_type": r.headers.get("Content-Type","")})
-        out["ok"] = (200 <= r.status_code < 400)
+        out.update(
+            {"status": r.status_code, "final_url": r.url, "content_type": r.headers.get("Content-Type", "")}
+        )
+        out["ok"] = 200 <= r.status_code < 400
         r.close()
     except Exception as e:
         out["error"] = str(e)
     return out
 
+# --- Strava helpers ---
 STRAVA_ROUTE_ID_RE = re.compile(r"(?:^|/)(?:routes|routes/view)/(\d+)(?:[/?#].*)?$", re.I)
 
 def is_strava_route_url(u: str) -> bool:
@@ -120,26 +130,45 @@ def is_strava_route_url(u: str) -> bool:
     return ("strava.com" in lu) and ("/routes/" in lu)
 
 def extract_digits(s: str) -> str:
+    # Pulls all digits; works for "3.3357E+18" or "3,335,7..." etc.
     return "".join(re.findall(r"\d+", s or ""))
 
-def extract_route_id(u: str, source_id: str) -> str:
+def extract_route_id_from_url(u: str) -> str:
     m = STRAVA_ROUTE_ID_RE.search(u or "")
-    if m:
-        return m.group(1)
-    sid = extract_digits(source_id)
-    return sid
+    return m.group(1) if m else ""
 
+def extract_route_id(u: str, source_id: str) -> str:
+    """Prefer ID from URL; else digits from Source ID."""
+    rid = extract_route_id_from_url(u)
+    if rid:
+        return rid
+    return extract_digits(source_id)
+
+# --- URL-first reconciliation ---
 def reconcile_route_url(url: str, source_id: str):
+    """
+    Prefer the ID in the URL. Only rebuild the URL if:
+      - URL contains a Strava route id that looks 'short' (<12 digits), AND
+      - Source ID contains a 'long' id (>=12 digits).
+    Returns (possibly updated url, debug_dict).
+    """
     dbg = {}
-    rid_from_url = extract_route_id(url, "")
+    rid_from_url = extract_route_id_from_url(url) if url else ""
     rid_from_src = extract_digits(source_id)
     if rid_from_url:
         dbg["rid_from_url"] = rid_from_url
     if rid_from_src:
         dbg["rid_from_source"] = rid_from_src
-    if rid_from_url and rid_from_src and len(rid_from_src) >= 12 and len(rid_from_url) < len(rid_from_src):
+
+    # Only rebuild when URL id clearly looks short and source id is clearly long
+    if (
+        url and rid_from_url and rid_from_src
+        and len(rid_from_url) < 12
+        and len(rid_from_src) >= 12
+    ):
         url = f"https://www.strava.com/routes/{rid_from_src}"
         dbg["url_rebuilt_from_source"] = url
+
     return url, dbg
 
 def strava_route_status_via_api(route_id: str, token: str) -> str:
@@ -161,6 +190,7 @@ def strava_route_status_via_api(route_id: str, token: str) -> str:
     except Exception as e:
         return f"API error: {e}"
 
+# ---------------------------- Load Data UI ----------------------------------
 mode = st.radio("Load data from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
 dfs = None
@@ -184,7 +214,7 @@ if not dfs or "Schedule" not in dfs:
     st.stop()
 
 sched = dfs["Schedule"]
-sched.columns = [str(c) for c in sched.columns]
+sched.columns = [str(c) for c in sched.columns]  # ensure str headers
 cols = {c: norm_header(c) for c in sched.columns}
 
 def find_col(targets):
@@ -194,42 +224,51 @@ def find_col(targets):
                 return c
     return None
 
-date_col = find_col(["date","datethu"])
+date_col = find_col(["date", "datethu"])
 r_names = [find_col(["route1name"]), find_col(["route2name"])]
-r_types = [find_col(["route1routelinktype","route1linktype"]), find_col(["route2routelinktype","route2linktype"])]
-r_urls  = [find_col(["route1routelinksourceurl","route1routelink","route1url"]), find_col(["route2routelinksourceurl","route2routelink","route2url"])]
-r_srcid = [find_col(["route1sourceid","route1id"]), find_col(["route2sourceid","route2id"])]
+r_types = [find_col(["route1routelinktype", "route1linktype"]), find_col(["route2routelinktype", "route2linktype"])]
+r_urls  = [find_col(["route1routelinksourceurl", "route1routelink", "route1url"]),
+           find_col(["route2routelinksourceurl", "route2routelink", "route2url"])]
+r_srcid = [find_col(["route1sourceid", "route1id"]), find_col(["route2sourceid", "route2id"])]
 
 if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
     st.error("Schedule is missing expected columns for route names/link types/URLs.")
     st.stop()
 
+# -------------------------- Normalize rows (long) ---------------------------
 rows_long = []
 for _, row in sched.iterrows():
     d = row.get(date_col, "")
-    for i, side in enumerate(["1","2"]):
+    for i, side in enumerate(["1", "2"]):
         nm = clean(row.get(r_names[i], ""))
         lt = clean(row.get(r_types[i], ""))
         url_raw = clean(row.get(r_urls[i], ""))
         sid_raw = clean(row.get(r_srcid[i], "")) if r_srcid[i] else ""
         if not nm or nm.lower() == "no run":
             continue
+
+        # URL-first: only synthesize from Source ID if URL is missing/placeholder
         url = make_https(url_raw)
         if (not url) and lt.lower().startswith("strava"):
-            rid_guess = extract_digits(sid_raw)
-            if len(rid_guess) >= 12:
-                url = f"https://www.strava.com/routes/{rid_guess}"
-        if url and is_strava_route_url(url):
-            url, _ = reconcile_route_url(url, sid_raw)
-        rows_long.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Source ID": sid_raw})
+            sid_digits = extract_digits(sid_raw)
+            if len(sid_digits) >= 12:
+                url = f"https://www.strava.com/routes/{sid_digits}"
+
+        # If URL exists, keep it; only rebuild later if it looks short and source is long
+        rows_long.append(
+            {"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Source ID": sid_raw}
+        )
 
 links_df = pd.DataFrame(rows_long)
 st.write(f"Found {len(links_df)} route link entries from the Schedule.")
 
 debug = st.checkbox("Show debug for first 5 rows", value=True)
 
+# ------------------------------- Validate -----------------------------------
 st.subheader("Validate Links")
-limit = st.slider("Limit rows to validate", min_value=10, max_value=len(links_df), value=min(200, len(links_df)), step=10)
+limit = st.slider(
+    "Limit rows to validate", min_value=10, max_value=len(links_df), value=min(200, len(links_df)), step=10
+)
 
 subset = links_df.head(limit).copy()
 token = st.session_state.get("strava_token")
@@ -239,50 +278,72 @@ out_rows = []
 for idx, r in subset.iterrows():
     u = clean(r["URL"]); lt = clean(r["Link Type"]); sid_raw = clean(r["Source ID"])
     row_debug = {}
-    if debug and len(out_rows) < 5:
+    if debug and len(out_rows) < 5:  # only annotate first 5 rows
         row_debug["raw_url"] = u or "(empty)"
         row_debug["link_type"] = lt
         row_debug["source_id_raw"] = sid_raw
 
-    if is_strava_route_url(u):
+    # URL-first reconcile: only rebuild if URL id is clearly short and source id is long
+    if u and is_strava_route_url(u):
         u2, dbg2 = reconcile_route_url(u, sid_raw)
         if u2 != u:
             u = u2
         if debug and len(out_rows) < 5:
             row_debug.update(dbg2)
 
+    # If still empty & Link Type is Strava, try synth (URL missing)
     if not u and lt.lower().startswith("strava"):
-        rid_guess = extract_digits(sid_raw)
-        if len(rid_guess) >= 12:
-            u = f"https://www.strava.com/routes/{rid_guess}"
+        sid_digits = extract_digits(sid_raw)
+        if len(sid_digits) >= 12:
+            u = f"https://www.strava.com/routes/{sid_digits}"
             if debug and len(out_rows) < 5:
                 row_debug["synth_url_from_id"] = u
 
     if not u:
-        out_rows.append({**r, "Status":"Missing URL","HTTP":"","Content-Type":"","Final URL":"","Debug":row_debug if debug else ""})
+        out_rows.append({**r, "Status": "Missing URL", "HTTP": "", "Content-Type": "", "Final URL": "", "Debug": row_debug if debug else ""})
         continue
 
+    # Prefer Strava API path if connected and URL looks like a Strava route
     if token_present and is_strava_route_url(u):
-        rid = extract_route_id(u, sid_raw)
+        rid = extract_route_id(u, sid_raw)  # prefers URL id
         if debug and len(out_rows) < 5:
             row_debug["route_id_extracted"] = rid
         api_status = strava_route_status_via_api(rid, token) if rid else "Missing route id"
-        out_rows.append({**r, "Status": api_status, "HTTP":"", "Content-Type":"", "Final URL": u, "Debug":row_debug if debug else ""})
+        out_rows.append({**r, "Status": api_status, "HTTP": "", "Content-Type": "", "Final URL": u, "Debug": row_debug if debug else ""})
         time.sleep(0.05)
         continue
 
+    # Fallback: public fetch (non-Strava or not connected)
     info = try_get_public(u)
-    final_status = "Needs Auth/Not Public" if ("strava.com" in u.lower() and "/routes/" in u.lower() and not token_present) else ("Rate-limited (try again)" if info.get("status")==429 else ("OK" if info.get("ok") else "Broken/Unreachable"))
+    final_status = (
+        "Needs Auth/Not Public" if ("strava.com" in u.lower() and "/routes/" in u.lower() and not token_present)
+        else ("Rate-limited (try again)" if info.get("status") == 429 else ("OK" if info.get("ok") else "Broken/Unreachable"))
+    )
     if debug and len(out_rows) < 5:
         row_debug["public_fetch"] = {"status": info.get("status"), "final_url": info.get("final_url")}
-    out_rows.append({**r, "Status":final_status,"HTTP":info.get("status"),"Content-Type":info.get("content_type"),"Final URL":info.get("final_url"), "Debug":row_debug if debug else ""})
+    out_rows.append({
+        **r,
+        "Status": final_status,
+        "HTTP": info.get("status"),
+        "Content-Type": info.get("content_type"),
+        "Final URL": info.get("final_url"),
+        "Debug": row_debug if debug else ""
+    })
     time.sleep(0.05)
 
 report_df = pd.DataFrame(out_rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
-st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
+st.download_button(
+    "⬇️ Download validation report (CSV)",
+    data=report_df.to_csv(index=False).encode("utf-8"),
+    file_name="route_link_validation.csv",
+    mime="text/csv",
+)
 
+# ------------------------------- Export GPX ---------------------------------
 st.subheader("Export GPX")
+
+# Direct .gpx links
 gpx_ok = report_df[(report_df["Status"].str.contains("OK")) & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if not gpx_ok.empty:
     pick = st.multiselect("Select direct-GPX routes to download", gpx_ok["Route Name"].tolist(), key="pick_gpx_direct")
@@ -300,6 +361,7 @@ if not gpx_ok.empty:
                     st.warning(f"Failed to download {row['Route Name']}: {e}")
         st.download_button("⬇️ Download GPX ZIP (direct)", data=buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
 
+# Strava via API (works for your own public & private routes; others' public routes too)
 if token_present:
     strava_routes = report_df[report_df["URL"].str.contains("strava.com") & report_df["URL"].str.contains("/routes/")]
     if not strava_routes.empty:
