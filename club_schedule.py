@@ -7,7 +7,7 @@ import streamlit as st
 
 st.set_page_config(page_title="Club Schedule", page_icon="🏃", layout="wide")
 
-st.title("🏃 Club Schedule — Review & Checks")
+st.title("🏃 Club Schedule — Review & Checks (CSV-based Google Sheets)")
 
 # -----------------------------
 # Utilities
@@ -50,19 +50,38 @@ def to_csv_download(df: pd.DataFrame, filename: str, label: str):
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Download " + label, data=csv, file_name=filename, mime="text/csv")
 
+def extract_sheet_id(url: str):
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    return m.group(1) if m else None
+
+def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
+    # Load a single tab from a Google Sheet using CSV export via gviz.
+    # The sheet must be shared as 'Anyone with the link can view'.
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    try:
+        df = pd.read_csv(export_url)
+        # Some locales may export with unnamed index column; drop if present
+        if df.columns[0].lower().startswith("unnamed"):
+            df = df.drop(columns=[df.columns[0]])
+        return df
+    except Exception as e:
+        st.error(f"Could not load tab '{sheet_name}' via CSV: {e}")
+        return pd.DataFrame()
+
 # -----------------------------
 # Data source controls
 # -----------------------------
-tab1, tab2 = st.tabs(["📄 Upload Excel", "🟢 Google Sheet URL"])
+tab1, tab2 = st.tabs(["📄 Upload Excel", "🟢 Google Sheet URL (CSV)"])
 
 with tab1:
     up = st.file_uploader("Upload Annual_Schedule_MASTER.xlsx", type=["xlsx"])
+
 with tab2:
     gs_url = st.text_input(
         "Paste your Google Sheet URL (must have tabs: Schedule, Route Master, Config). "
-        "Use 'File → Share → Anyone with the link can view'."
+        "Share the sheet so 'Anyone with the link can view'.\n"
+        "This loader uses CSV exports per tab (no openpyxl needed)."
     )
-    gsheet_note = st.caption("Tip: a public Sheet can be read via `export?format=xlsx` for reliability.")
 
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
@@ -77,31 +96,35 @@ def load_from_excel_bytes(bts: bytes):
             dfs[opt] = pd.read_excel(xls, opt)
     return dfs
 
-def try_load_google_sheet(url: str):
-    # Simple approach: fetch the xlsx export if present
+def load_from_google_csv(url: str):
     if "docs.google.com" not in url:
         st.warning("That doesn’t look like a Google Sheet URL.")
         return None
-    if "/edit" in url:
-        base = url.split("/edit")[0]
-    else:
-        base = url.rstrip("/")
-    export = base + "/export?format=xlsx"
-    try:
-        import requests
-        r = requests.get(export, timeout=20)
-        r.raise_for_status()
-        return load_from_excel_bytes(r.content)
-    except Exception as e:
-        st.error(f"Couldn’t read Google Sheet: {e}")
+    sheet_id = extract_sheet_id(url)
+    if not sheet_id:
+        st.error("Could not extract Sheet ID. Please paste a standard Google Sheets URL.")
         return None
+    required_tabs = ["Schedule", "Route Master", "Config"]
+    optional_tabs = ["Rules", "Pair Map", "Fetch GPX Checklist"]
+    dfs = {}
+    for tab in required_tabs:
+        df = load_google_sheet_csv(sheet_id, tab)
+        if df.empty and tab in ["Schedule", "Route Master"]:
+            st.error(f"Required tab '{tab}' is missing or empty.")
+            return None
+        dfs[tab] = df
+    for tab in optional_tabs:
+        df = load_google_sheet_csv(sheet_id, tab)
+        if not df.empty:
+            dfs[tab] = df
+    return dfs
 
 # Load data
 dfs = None
 if up is not None:
     dfs = load_from_excel_bytes(up.read())
 elif gs_url:
-    dfs = try_load_google_sheet(gs_url)
+    dfs = load_from_google_csv(gs_url)
 
 if not dfs:
     st.info("Upload the Excel master or paste a Google Sheet URL to continue.")
@@ -223,4 +246,4 @@ if not rules.empty:
 else:
     st.caption("No Rules sheet found. (Optional)")
 
-st.success("Loaded and checked. Meet location, OAB sharing, and holiday 'No run' rules are respected.")
+st.success("Loaded and checked. Meet location, OAB sharing, and holiday 'No run' rules are respected. (CSV loader—no openpyxl needed)")
