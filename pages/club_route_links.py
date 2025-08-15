@@ -1,5 +1,5 @@
 # pages/club_route_links.py
-# Build: v2025.08.15-STRAVA-IDFIX-6 (URL-first, long-ID safe)
+# Build: v2025.08.15-STRAVA-IDFIX-7 (URL-first + scientific-notation ID expansion)
 
 import io
 import re
@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BUILD_ID = "v2025.08.15-STRAVA-IDFIX-6"
+BUILD_ID = "v2025.08.15-STRAVA-IDFIX-7"
 
 # --- Capture Strava token from ?code=... on redirect back to this page ---
 def capture_strava_token_from_query():
@@ -130,31 +130,62 @@ def is_strava_route_url(u: str) -> bool:
     return ("strava.com" in lu) and ("/routes/" in lu)
 
 def extract_digits(s: str) -> str:
-    # Pulls all digits; works for "3.3357E+18" or "3,335,7..." etc.
+    # Pulls all digits; works for plain text like "3212105058406369490"
     return "".join(re.findall(r"\d+", s or ""))
+
+def expand_sci_id(s: str) -> str:
+    """
+    Expand scientific-notation numeric strings like '3.3357E+18' -> '3335700000000000000'.
+    Returns '' if it doesn't match sci-notation.
+    """
+    if not s:
+        return ""
+    s = s.strip()
+    m = re.match(r"^(\d+)(?:\.(\d+))?[eE]\+?(\d+)$", s)
+    if not m:
+        return ""
+    int_part, frac_part, exp_str = m.group(1), (m.group(2) or ""), m.group(3)
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        return ""
+    digits = int_part + frac_part
+    zeros_to_add = exp - len(frac_part)
+    if zeros_to_add >= 0:
+        return digits + ("0" * zeros_to_add)
+    else:
+        # exp smaller than frac length (unlikely for route IDs); fall back to plain digits
+        return digits
+
+def source_id_to_long_digits(s: str) -> str:
+    """Prefer sci-notation expansion, else fallback to digit-extraction."""
+    expanded = expand_sci_id(s)
+    if expanded:
+        return expanded
+    return extract_digits(s)
 
 def extract_route_id_from_url(u: str) -> str:
     m = STRAVA_ROUTE_ID_RE.search(u or "")
     return m.group(1) if m else ""
 
 def extract_route_id(u: str, source_id: str) -> str:
-    """Prefer ID from URL; else digits from Source ID."""
+    """Prefer ID from URL; else parse Source ID (including sci-notation)."""
     rid = extract_route_id_from_url(u)
     if rid:
         return rid
-    return extract_digits(source_id)
+    return source_id_to_long_digits(source_id)
 
 # --- URL-first reconciliation ---
 def reconcile_route_url(url: str, source_id: str):
     """
     Prefer the ID in the URL. Only rebuild the URL if:
       - URL contains a Strava route id that looks 'short' (<12 digits), AND
-      - Source ID contains a 'long' id (>=12 digits).
+      - Source ID contains a 'long' id (>=12 digits), parsed via sci-notation if needed.
     Returns (possibly updated url, debug_dict).
     """
     dbg = {}
     rid_from_url = extract_route_id_from_url(url) if url else ""
-    rid_from_src = extract_digits(source_id)
+    rid_from_src = source_id_to_long_digits(source_id)
     if rid_from_url:
         dbg["rid_from_url"] = rid_from_url
     if rid_from_src:
@@ -250,11 +281,10 @@ for _, row in sched.iterrows():
         # URL-first: only synthesize from Source ID if URL is missing/placeholder
         url = make_https(url_raw)
         if (not url) and lt.lower().startswith("strava"):
-            sid_digits = extract_digits(sid_raw)
+            sid_digits = source_id_to_long_digits(sid_raw)
             if len(sid_digits) >= 12:
                 url = f"https://www.strava.com/routes/{sid_digits}"
 
-        # If URL exists, keep it; only rebuild later if it looks short and source is long
         rows_long.append(
             {"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Source ID": sid_raw}
         )
@@ -293,7 +323,7 @@ for idx, r in subset.iterrows():
 
     # If still empty & Link Type is Strava, try synth (URL missing)
     if not u and lt.lower().startswith("strava"):
-        sid_digits = extract_digits(sid_raw)
+        sid_digits = source_id_to_long_digits(sid_raw)
         if len(sid_digits) >= 12:
             u = f"https://www.strava.com/routes/{sid_digits}"
             if debug and len(out_rows) < 5:
@@ -305,7 +335,7 @@ for idx, r in subset.iterrows():
 
     # Prefer Strava API path if connected and URL looks like a Strava route
     if token_present and is_strava_route_url(u):
-        rid = extract_route_id(u, sid_raw)  # prefers URL id
+        rid = extract_route_id(u, sid_raw)  # prefers URL id, else sci-expanded source id
         if debug and len(out_rows) < 5:
             row_debug["route_id_extracted"] = rid
         api_status = strava_route_status_via_api(rid, token) if rid else "Missing route id"
@@ -372,7 +402,7 @@ if token_present:
             import zipfile
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for _, row in strava_routes[strava_routes["Route Name"].isin(pick2)].iterrows():
+                for _, row in strava_routes[strra_routes["Route Name"].isin(pick2)].iterrows():
                     rid = row["Route ID"]
                     if not rid:
                         st.warning(f"Missing route id for {row['Route Name']}")
