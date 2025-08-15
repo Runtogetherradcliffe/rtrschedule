@@ -2,12 +2,13 @@
 import io
 import re
 import time
+import urllib.parse
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Club Schedule", page_icon="🏃", layout="wide")
 
-st.title("🏃 Club Schedule — Review & Checks (CSV-based Google Sheets)")
+st.title("🏃 Club Schedule — Review & Checks (CSV-based, robust loaders)")
 
 # -----------------------------
 # Utilities
@@ -57,11 +58,12 @@ def extract_sheet_id(url: str):
 def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
     # Load a single tab from a Google Sheet using CSV export via gviz.
     # The sheet must be shared as 'Anyone with the link can view'.
-    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    encoded = urllib.parse.quote(sheet_name, safe="")
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={encoded}"
     try:
         df = pd.read_csv(export_url)
         # Some locales may export with unnamed index column; drop if present
-        if df.columns[0].lower().startswith("unnamed"):
+        if len(df.columns) and df.columns[0].lower().startswith("unnamed"):
             df = df.drop(columns=[df.columns[0]])
         return df
     except Exception as e:
@@ -71,64 +73,85 @@ def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
 # -----------------------------
 # Data source controls
 # -----------------------------
-tab1, tab2 = st.tabs(["📄 Upload Excel", "🟢 Google Sheet URL (CSV)"])
+st.markdown("#### Data sources")
+mode = st.radio(
+    "Choose how to load your master data:",
+    ["Google Sheet (CSV export — recommended)", "Upload Excel (.xlsx)", "Upload CSV files (3 tabs)"],
+    horizontal=True
+)
 
-with tab1:
-    up = st.file_uploader("Upload Annual_Schedule_MASTER.xlsx", type=["xlsx"])
-
-with tab2:
-    gs_url = st.text_input(
-        "Paste your Google Sheet URL (must have tabs: Schedule, Route Master, Config). "
-        "Share the sheet so 'Anyone with the link can view'.\n"
-        "This loader uses CSV exports per tab (no openpyxl needed)."
-    )
-
-def load_from_excel_bytes(bts: bytes):
-    xls = pd.ExcelFile(io.BytesIO(bts))
-    dfs = {
-        "Schedule": pd.read_excel(xls, "Schedule"),
-        "Route Master": pd.read_excel(xls, "Route Master"),
-        "Config": pd.read_excel(xls, "Config") if "Config" in xls.sheet_names else pd.DataFrame(),
-    }
-    # Optional sheets
-    for opt in ["Rules", "Pair Map", "Fetch GPX Checklist"]:
-        if opt in xls.sheet_names:
-            dfs[opt] = pd.read_excel(xls, opt)
-    return dfs
-
-def load_from_google_csv(url: str):
-    if "docs.google.com" not in url:
-        st.warning("That doesn’t look like a Google Sheet URL.")
-        return None
-    sheet_id = extract_sheet_id(url)
-    if not sheet_id:
-        st.error("Could not extract Sheet ID. Please paste a standard Google Sheets URL.")
-        return None
-    required_tabs = ["Schedule", "Route Master", "Config"]
-    optional_tabs = ["Rules", "Pair Map", "Fetch GPX Checklist"]
-    dfs = {}
-    for tab in required_tabs:
-        df = load_google_sheet_csv(sheet_id, tab)
-        if df.empty and tab in ["Schedule", "Route Master"]:
-            st.error(f"Required tab '{tab}' is missing or empty.")
-            return None
-        dfs[tab] = df
-    for tab in optional_tabs:
-        df = load_google_sheet_csv(sheet_id, tab)
-        if not df.empty:
-            dfs[tab] = df
-    return dfs
-
-# Load data
 dfs = None
-if up is not None:
-    dfs = load_from_excel_bytes(up.read())
-elif gs_url:
-    dfs = load_from_google_csv(gs_url)
+
+if mode == "Google Sheet (CSV export — recommended)":
+    gs_url = st.text_input(
+        "Paste your Google Sheet URL (tabs required: Schedule, RouteMaster, Config). "
+        "Share the sheet so 'Anyone with the link can view'. Tab names are case-sensitive."
+    )
+    if gs_url:
+        sheet_id = extract_sheet_id(gs_url)
+        if not sheet_id:
+            st.error("Could not extract Sheet ID. Please paste a standard Google Sheets URL.")
+        else:
+            required_tabs = ["Schedule", "RouteMaster", "Config"]
+            optional_tabs = ["Rules", "Pair Map", "Fetch GPX Checklist"]
+            dfs_try = {}
+            missing = []
+            for tab in required_tabs:
+                df = load_google_sheet_csv(sheet_id, tab)
+                if df.empty:
+                    missing.append(tab)
+                dfs_try[tab] = df
+            for tab in optional_tabs:
+                df = load_google_sheet_csv(sheet_id, tab)
+                if not df.empty:
+                    dfs_try[tab] = df
+            if missing:
+                st.error("Missing or empty required tab(s): " + ", ".join(missing))
+            else:
+                dfs = dfs_try
+
+elif mode == "Upload Excel (.xlsx)":
+    up = st.file_uploader("Upload Annual_Schedule_MASTER.xlsx", type=["xlsx"])
+    if up is not None:
+        try:
+            xls = pd.ExcelFile(io.BytesIO(up.read()))
+            dfs = {
+                "Schedule": pd.read_excel(xls, "Schedule"),
+                "RouteMaster": pd.read_excel(xls, "Route Master") if "Route Master" in xls.sheet_names else pd.read_excel(xls, "RouteMaster"),
+                "Config": pd.read_excel(xls, "Config") if "Config" in xls.sheet_names else pd.DataFrame(),
+            }
+            for opt in ["Rules", "Pair Map", "Fetch GPX Checklist"]:
+                if opt in xls.sheet_names:
+                    dfs[opt] = pd.read_excel(xls, opt)
+        except ImportError as e:
+            st.error("Excel reading requires the 'openpyxl' package. Add 'openpyxl' to requirements.txt or switch to CSV options.")
+        except Exception as e:
+            st.error(f"Could not read Excel file: {e}")
+
+elif mode == "Upload CSV files (3 tabs)":
+    st.caption("Upload three CSVs named exactly: 'Schedule.csv', 'RouteMaster.csv', 'Config.csv' (optional: 'Rules.csv')")
+    files = st.file_uploader("Upload CSV files", type=["csv"], accept_multiple_files=True)
+    if files:
+        name_map = {f.name: f for f in files}
+        missing = [n for n in ["Schedule.csv", "RouteMaster.csv", "Config.csv"] if n not in name_map]
+        if missing:
+            st.error("Missing required CSV file(s): " + ", ".join(missing))
+        else:
+            dfs = {
+                "Schedule": pd.read_csv(name_map["Schedule.csv"]),
+                "RouteMaster": pd.read_csv(name_map["RouteMaster.csv"]),
+                "Config": pd.read_csv(name_map["Config.csv"]),
+            }
+            if "Rules.csv" in name_map:
+                dfs["Rules"] = pd.read_csv(name_map["Rules.csv"])
 
 if not dfs:
-    st.info("Upload the Excel master or paste a Google Sheet URL to continue.")
+    st.info("Load your data using one of the methods above to continue.")
     st.stop()
+
+# Harmonize key tab name (RouteMaster vs Route Master)
+if "RouteMaster" in dfs and "Route Master" not in dfs:
+    dfs["Route Master"] = dfs["RouteMaster"]
 
 schedule = dfs.get("Schedule", pd.DataFrame())
 route_master = dfs.get("Route Master", pd.DataFrame())
@@ -146,9 +169,10 @@ allowed_light = set(str(cfg_value(config, "Light Season Allowed Terrain", "Road,
 
 # Parse datetimes + meet location
 if not schedule.empty:
-    schedule["Date (Thu)"] = pd.to_datetime(schedule["Date (Thu)"])
+    if "Date (Thu)" in schedule.columns:
+        schedule["Date (Thu)"] = pd.to_datetime(schedule["Date (Thu)"])
     if "Meet Location" not in schedule.columns:
-        schedule["Meet Location"] = schedule["Notes"].apply(infer_meet_location)
+        schedule["Meet Location"] = schedule.get("Notes", "").apply(infer_meet_location) if "Notes" in schedule.columns else ""
 
 # -----------------------------
 # Display schedule overview
@@ -168,7 +192,9 @@ st.subheader("Checks")
 # Overuse (count each route once per date; ignore 'No run')
 pairs = []
 for _, r in schedule.iterrows():
-    d = r["Date (Thu)"]
+    d = r.get("Date (Thu)")
+    if pd.isna(d): 
+        continue
     names = {clean(r.get("Route 1 - Name")), clean(r.get("Route 2 - Name"))}
     names = {n for n in names if n and n.lower() != "no run"}
     for n in names:
@@ -181,7 +207,7 @@ overused = use_counts[use_counts > overused_threshold].rename("Uses")
 overused_df = overused.rename_axis("Route").reset_index()
 
 never_used_df = pd.DataFrame(columns=["Route"])
-if not route_master.empty:
+if not route_master.empty and "Route Name" in route_master.columns:
     master_names = set(route_master["Route Name"].dropna().apply(clean))
     used_names = set(use_counts.index)
     never_used = sorted([r for r in (master_names - used_names) if r and r.lower() != "no run"])
@@ -190,7 +216,11 @@ if not route_master.empty:
 # Season mismatches
 violations = []
 for _, r in schedule.iterrows():
-    is_dark = in_dark_season(r["Date (Thu)"], dark_start, dark_end)
+    d = r.get("Date (Thu)")
+    if pd.isna(d):
+        continue
+    # Using existing dark/light boundaries
+    is_dark = in_dark_season(pd.to_datetime(d), dark_start, dark_end)
     for side in ["1","2"]:
         nm = clean(r.get(f"Route {side} - Name"))
         ter = clean(r.get(f"Route {side} - Terrain (Road/Trail/Mixed)"))
@@ -199,7 +229,7 @@ for _, r in schedule.iterrows():
         allowed = allowed_dark if is_dark else allowed_light
         if ter not in allowed:
             violations.append({
-                "Date": r["Date (Thu)"],
+                "Date": pd.to_datetime(d),
                 "Route": nm,
                 "Terrain": ter,
                 "Season": "Dark" if is_dark else "Light",
@@ -234,13 +264,14 @@ st.divider()
 clump_cols = [c for c in schedule.columns if "Clumping" in c]
 if clump_cols:
     st.markdown("### Clumping Flags (from your schedule)")
-    st.dataframe(schedule[["Date (Thu)","Route 1 - Name","Route 1 - Area","Route 2 - Name","Route 2 - Area"] + clump_cols].fillna(""),
+    base_cols = [c for c in ["Date (Thu)","Route 1 - Name","Route 1 - Area","Route 2 - Name","Route 2 - Area"] if c in schedule.columns]
+    st.dataframe(schedule[base_cols + clump_cols].fillna(""),
                  use_container_width=True, hide_index=True)
 else:
     st.caption("No clumping flag columns found. (Optional)")
 
 # Rules display (so leaders see the holiday/no-run policy)
-if not rules.empty:
+if isinstance(rules, pd.DataFrame) and not rules.empty:
     st.markdown("### Rules")
     st.dataframe(rules, use_container_width=True, hide_index=True)
 else:
