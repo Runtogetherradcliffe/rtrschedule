@@ -1,38 +1,21 @@
-# Club Schedule Streamlit App
 
-This Streamlit app manages and reviews your running club's annual schedule.
+# Running Club Schedule App
 
-## Pages
+This Streamlit app includes:
+- `club_schedule.py`: load your schedule from Google Sheets or Excel, and run checks (overuse, season mismatches, etc.).
+- `pages/club_route_links.py`: validate route links from the Schedule tab, normalize Strava/Plotaroute URLs, and export GPX (Strava via OAuth).
+- `pages/strava_oauth.py`: connect your Strava account.
 
-### club_schedule.py
-- Main page to load and review the master schedule from Google Sheets or Excel.
-- Checks for route overuse, seasonal mismatches, duplication, and 'No run' rules.
+## Deploy (Streamlit Cloud)
+1. Push all files to GitHub.
+2. Set Streamlit Secrets (App → Settings → Secrets):
+```
+STRAVA_CLIENT_ID = "your_client_id"
+STRAVA_CLIENT_SECRET = "your_client_secret"
+STRAVA_REDIRECT_URI = "https://YOUR-APP.streamlit.app"
+```
+3. Deploy the app.
 
-### pages/club_route_links.py
-- Validates links in the Route Master tab.
-- Detects Strava Route / Activity, Plotaroute, and direct GPX.
-- Produces a CSV validation report.
-- Downloads GPX for direct `.gpx` links.
-
-## Data Sources Supported
-
-### Google Sheets (CSV export — recommended)
-- Share your Google Sheet: 'Anyone with the link can view'.
-- Required tabs: `Schedule`, `RouteMaster`, `Config`.
-- Optional: `Rules`, `Pair Map`, `Fetch GPX Checklist`.
-
-### Excel (.xlsx)
-- Requires `openpyxl` (included in requirements.txt).
-- Tabs: `Schedule`, `RouteMaster` (or `Route Master`), `Config`.
-
-### CSV files
-- Export each required tab as CSV and upload:
-  - `Schedule.csv`
-  - `RouteMaster.csv`
-  - `Config.csv`
-  - (optional) `Rules.csv`
-
-## Deployment on Streamlit Cloud
-1. Push all files to your GitHub repo.
-2. Connect the repo to Streamlit Cloud and deploy.
-
+## Google Sheets mode
+- Share the sheet as "Anyone with the link can view".
+- Required tabs: `Schedule`; optional: `Route Master`/`RouteMaster`/`Routemaster`, `Config`.

@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
-st.title("🗺️ Route Links & GPX — Validate & Fetch (robust Strava checks)")
+st.title("🗺️ Route Links & GPX — Validate & Fetch (Strava-aware)")
 
 # -----------------------------
 # Helpers
@@ -36,19 +36,9 @@ def load_google_sheet_csv(sheet_id: str, sheet_name: str) -> pd.DataFrame:
 def load_from_google_csv(url: str):
     sheet_id = extract_sheet_id(url)
     dfs = {}
-    # Schedule is the primary source
     df = load_google_sheet_csv(sheet_id, "Schedule")
     if not df.empty:
         dfs["Schedule"] = df
-    # Optional
-    for tab in ["Route Master", "RouteMaster", "Routemaster"]:
-        try:
-            df = load_google_sheet_csv(sheet_id, tab)
-            if not df.empty:
-                dfs["Route Master"] = df
-                break
-        except Exception:
-            pass
     return dfs
 
 def load_from_excel_bytes(bts: bytes):
@@ -56,10 +46,6 @@ def load_from_excel_bytes(bts: bytes):
     dfs = {}
     if "Schedule" in xls.sheet_names:
         dfs["Schedule"] = pd.read_excel(xls, "Schedule")
-    for opt in ["Route Master", "RouteMaster"]:
-        if opt in xls.sheet_names:
-            dfs["Route Master"] = pd.read_excel(xls, opt)
-            break
     return dfs
 
 # -----------------------------
@@ -90,55 +76,24 @@ def normalize_url(link_type: str, url: str, source_id: str) -> str:
     lt = (link_type or "").strip().lower()
     url = (url or "").strip()
     sid = (source_id or "").strip()
-
-    # If URL is just an ID, build a full URL
     if url.isdigit() and not sid:
-        sid = url
-        url = ""
-
+        sid = url; url = ""
     if lt in ["strava route", "strava"] or STRAVA_ROUTE_RE.search(url) or (lt.startswith("strava") and sid.isdigit()):
         if not url or url.isdigit():
             url = f"https://www.strava.com/routes/{sid}"
         return make_https(url)
-
     if lt in ["strava activity"] or STRAVA_ACTIVITY_RE.search(url) or ("activity" in lt and sid.isdigit()):
         if not url or url.isdigit():
             url = f"https://www.strava.com/activities/{sid}"
         return make_https(url)
-
     if lt in ["plotaroute"] or PLOTAROUTE_RE.search(url) or ("plotaroute" in lt and sid.isdigit()):
         if not url or url.isdigit():
             url = f"https://www.plotaroute.com/route/{sid}"
         return make_https(url)
-
     if lt in ["gpx"] or DIRECT_GPX_RE.search(url):
         return make_https(url)
-
     return make_https(url)
 
-def parse_link(link_type: str, url: str) -> LinkInfo:
-    lt = (link_type or "").strip().lower()
-    url = (url or "").strip()
-    sid = ""
-    if lt in ["strava route", "strava"] or STRAVA_ROUTE_RE.search(url):
-        m = STRAVA_ROUTE_RE.search(url)
-        if m: sid = m.group(1)
-        return LinkInfo("Strava Route", url, sid, False)
-    if lt in ["strava activity"] or STRAVA_ACTIVITY_RE.search(url):
-        m = STRAVA_ACTIVITY_RE.search(url)
-        if m: sid = m.group(1)
-        return LinkInfo("Strava Activity", url, sid, False)
-    if lt in ["plotaroute"] or PLOTAROUTE_RE.search(url):
-        m = PLOTAROUTE_RE.search(url)
-        if m: sid = m.group(1)
-        return LinkInfo("Plotaroute", url, sid, False)
-    if lt in ["gpx"] or DIRECT_GPX_RE.search(url):
-        return LinkInfo("GPX", url, "", True)
-    return LinkInfo(link_type or "Unknown", url, "", DIRECT_GPX_RE.search(url) is not None)
-
-# -----------------------------
-# Robust HTTP check
-# -----------------------------
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
@@ -146,30 +101,15 @@ def check_url(u: str, timeout=15):
     sess = requests.Session()
     sess.headers.update({"User-Agent": UA, "Accept": "*/*"})
     result = {"ok": False, "status": None, "final_url": "", "content_type": "", "error": ""}
-
     try:
-        # Try HEAD first
-        r = sess.head(u, allow_redirects=True, timeout=timeout)
+        r = sess.get(u, stream=True, allow_redirects=True, timeout=timeout)
         result.update({"status": r.status_code, "final_url": r.url, "content_type": r.headers.get("Content-Type","")})
-        if 200 <= r.status_code < 400 and result["content_type"]:
+        if 200 <= r.status_code < 400:
             result["ok"] = True
-            return result
-        # Fallback to GET (stream)
-        r2 = sess.get(u, stream=True, allow_redirects=True, timeout=timeout)
-        result.update({"status": r2.status_code, "final_url": r2.url, "content_type": r2.headers.get("Content-Type","")})
-        if 200 <= r2.status_code < 400:
-            result["ok"] = True
-            r2.close()
-            return result
-        # Final fallback GET full
-        r3 = sess.get(u, allow_redirects=True, timeout=timeout)
-        result.update({"status": r3.status_code, "final_url": r3.url, "content_type": r3.headers.get("Content-Type","")})
-        if 200 <= r3.status_code < 400:
-            result["ok"] = True
+        r.close()
         return result
     except Exception as e:
-        result["error"] = str(e)
-        return result
+        result["error"] = str(e); return result
 
 def classify_access(u: str, info: dict) -> str:
     if not info.get("ok"):
@@ -177,20 +117,12 @@ def classify_access(u: str, info: dict) -> str:
             return "Rate-limited (try again)"
         return "Broken/Unreachable"
     final = (info.get("final_url") or "").lower()
-    # Login redirects / private
     if "strava.com/login" in final or "strava.com/session" in final:
         return "Needs Auth/Not Public"
-    if "private" in final:
-        return "Not Public"
-    # Content-type heuristics
-    ct = (info.get("content_type") or "").lower()
-    if "text/html" in ct or "text/plain" in ct or "application/xml" in ct or "application/gpx" in ct:
-        return "OK"
-    # default ok
     return "OK"
 
 # -----------------------------
-# Load UI
+# UI: load data
 # -----------------------------
 mode = st.radio("Load from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
@@ -215,8 +147,6 @@ if not dfs or "Schedule" not in dfs:
     st.stop()
 
 sched = dfs["Schedule"]
-
-# Build links from Schedule
 cols = {c: norm_header(c) for c in sched.columns}
 def find_col(targets):
     for c, n in cols.items():
@@ -249,16 +179,15 @@ for _, row in sched.iterrows():
         long_rows.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url_norm, "Source ID": sid})
 
 links_df = pd.DataFrame(long_rows)
-if links_df.empty:
-    st.warning("No route links found in the Schedule."); st.stop()
-
 st.write(f"Found {len(links_df)} route link entries from the Schedule.")
 
-# Validate links (with UA + fallbacks)
+# -----------------------------
+# Validate links
+# -----------------------------
 st.subheader("Validate Links")
-sample_limit = st.slider("Limit rows to validate", min_value=10, max_value=links_df.shape[0], value=min(200, links_df.shape[0]), step=10)
+limit = st.slider("Limit rows to validate", min_value=10, max_value=links_df.shape[0], value=min(200, links_df.shape[0]), step=10)
 
-subset = links_df.head(sample_limit).copy()
+subset = links_df.head(limit).copy()
 rows = []
 for _, r in subset.iterrows():
     name = clean(r["Route Name"]); url = clean(r["URL"]); ltype = clean(r["Link Type"])
@@ -279,25 +208,29 @@ for _, r in subset.iterrows():
         "Final URL": info.get("final_url"),
         "Source ID": r["Source ID"]
     })
-    # be polite to servers
     time.sleep(0.2)
 
 report_df = pd.DataFrame(rows).sort_values("Date")
 st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
-# GPX download for direct links
-st.subheader("Fetch GPX (direct .gpx links only)")
-gpx_candidates = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
-if gpx_candidates.empty:
-    st.caption("No direct .gpx links detected in the validated rows. Public Strava/Plotaroute can be validated; GPX export for Strava pages needs OAuth unless you have direct GPX URLs.")
-else:
-    pick = st.multiselect("Select routes to download GPX", gpx_candidates["Route Name"].tolist())
-    if st.button("Download selected GPX"):
+# -----------------------------
+# GPX Export
+# -----------------------------
+st.subheader("Export GPX")
+st.caption("Direct .gpx links download immediately. For Strava Routes, connect OAuth on the **Strava OAuth** page first.")
+
+token = st.session_state.get("strava_token")
+
+# Direct GPX
+gpx_ok = report_df[(report_df["Status"] == "OK") & (report_df["URL"].str.lower().str.contains(".gpx"))]
+if not gpx_ok.empty:
+    pick = st.multiselect("Select direct-GPX routes to download", gpx_ok["Route Name"].tolist(), key="pick_gpx_direct")
+    if st.button("Download selected direct GPX"):
         zip_buf = io.BytesIO()
         import zipfile
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for _, row in gpx_candidates[gpx_candidates["Route Name"].isin(pick)].iterrows():
+            for _, row in gpx_ok[gpx_ok["Route Name"].isin(pick)].iterrows():
                 url = row["URL"]
                 try:
                     resp = requests.get(url, timeout=20); resp.raise_for_status()
@@ -306,4 +239,39 @@ else:
                     zf.writestr(fname, resp.content)
                 except Exception as e:
                     st.warning(f"Failed to download {row['Route Name']}: {e}")
-        st.download_button("⬇️ Download GPX ZIP", data=zip_buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
+        st.download_button("⬇️ Download GPX ZIP (direct)", data=zip_buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
+
+# Strava via API (requires OAuth token)
+if token:
+    strava_routes = report_df[report_df["URL"].str.contains("strava.com/routes/")].copy()
+    if not strava_routes.empty:
+        st.markdown("#### Strava Routes via API")
+        strava_routes["Route ID"] = strava_routes["URL"].str.extract(r"/routes/(\d+)").astype(str)
+        pick2 = st.multiselect("Select Strava Routes to export GPX", strava_routes["Route Name"].tolist(), key="pick_strava")
+        if st.button("Export selected Strava GPX") and pick2:
+            zip_buf = io.BytesIO()
+            import zipfile
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for _, row in strava_routes[strava_routes["Route Name"].isin(pick2)].iterrows():
+                    rid = row.get("Route ID")
+                    if not rid:
+                        st.warning(f"Missing route id for {row['Route Name']}")
+                        continue
+                    api_url = f"https://www.strava.com/api/v3/routes/{rid}/export_gpx"
+                    try:
+                        resp = requests.get(api_url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+                        if resp.status_code == 200:
+                            fname = f"{row['Route Name'][:50].replace('/', '-')}-{rid}.gpx"
+                            zf.writestr(fname, resp.content)
+                        elif resp.status_code == 401:
+                            st.error("Unauthorized — token expired or missing scope. Reconnect on the Strava OAuth page.")
+                            break
+                        elif resp.status_code == 404:
+                            st.warning(f"Route not found or not accessible: {row['Route Name']}")
+                        else:
+                            st.warning(f"Strava API error {resp.status_code} for {row['Route Name']}")
+                    except Exception as e:
+                        st.warning(f"Failed to fetch GPX for {row['Route Name']}: {e}")
+            st.download_button("⬇️ Download Strava GPX ZIP", data=zip_buf.getvalue(), file_name="routes_strava_gpx.zip", mime="application/zip")
+else:
+    st.info("No Strava token found. Open the **Strava OAuth** page and connect your account to export GPX for Strava routes.")

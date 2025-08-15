@@ -1,13 +1,12 @@
 
 import io
 import re
-import time
 import urllib.parse
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Club Schedule", page_icon="🏃", layout="wide")
-st.title("🏃 Club Schedule — Review & Checks (robust tabs)")
+st.title("🏃 Club Schedule — Review & Checks")
 
 # -----------------------------
 # Utilities
@@ -67,50 +66,29 @@ def load_from_google_csv(url: str):
         st.error("Could not extract Sheet ID from URL.")
         return None
     dfs = {}
-    # Try multiple variants for the Route Master tab
-    route_tabs = ["Route Master", "RouteMaster", "Routemaster"]
-    schedule_tabs = ["Schedule"]
-    config_tabs = ["Config"]
-    loaded_any = False
-
-    # Route Master
-    rm = pd.DataFrame()
-    tried = []
-    for tab in route_tabs:
+    # Route Master (accept variants)
+    for tab in ["Route Master", "RouteMaster", "Routemaster"]:
         try:
             df = load_google_sheet_csv(sheet_id, tab)
             if not df.empty:
-                rm = df
                 dfs["Route Master"] = df
-                loaded_any = True
                 break
-            tried.append(tab)
         except Exception:
-            tried.append(tab)
-    if rm.empty:
-        st.error("Could not load a 'Route Master' tab. Tried: " + ", ".join(route_tabs))
-        return None
-
+            pass
     # Schedule
-    for tab in schedule_tabs:
-        try:
-            df = load_google_sheet_csv(sheet_id, tab)
-            if not df.empty:
-                dfs["Schedule"] = df
-                break
-        except Exception:
-            pass
-
+    try:
+        df = load_google_sheet_csv(sheet_id, "Schedule")
+        if not df.empty:
+            dfs["Schedule"] = df
+    except Exception:
+        pass
     # Config
-    for tab in config_tabs:
-        try:
-            df = load_google_sheet_csv(sheet_id, tab)
-            if not df.empty:
-                dfs["Config"] = df
-                break
-        except Exception:
-            pass
-
+    try:
+        df = load_google_sheet_csv(sheet_id, "Config")
+        if not df.empty:
+            dfs["Config"] = df
+    except Exception:
+        pass
     # Optional
     for tab in ["Rules", "Pair Map", "Fetch GPX Checklist"]:
         try:
@@ -119,21 +97,20 @@ def load_from_google_csv(url: str):
                 dfs[tab] = df
         except Exception:
             pass
-
     return dfs
 
 def load_from_excel_bytes(bts: bytes):
     xls = pd.ExcelFile(io.BytesIO(bts))
-    # Find a route master-like sheet
+    dfs = {}
+    # Route Master-like sheet
     rm_name = None
     for name in xls.sheet_names:
         if name.lower().replace(" ", "") in {"routemaster", "route_master"}:
-            rm_name = name
-            break
+            rm_name = name; break
     if rm_name is None:
-        rm_name = "Route Master" if "Route Master" in xls.sheet_names else "RouteMaster"
-    dfs = {}
-    dfs["Route Master"] = pd.read_excel(xls, rm_name)
+        rm_name = "Route Master" if "Route Master" in xls.sheet_names else ("RouteMaster" if "RouteMaster" in xls.sheet_names else None)
+    if rm_name:
+        dfs["Route Master"] = pd.read_excel(xls, rm_name)
     if "Schedule" in xls.sheet_names:
         dfs["Schedule"] = pd.read_excel(xls, "Schedule")
     if "Config" in xls.sheet_names:
@@ -164,12 +141,12 @@ elif mode == "Upload Excel (.xlsx)":
         try:
             dfs = load_from_excel_bytes(up.read())
         except ImportError:
-            st.error("Excel reading requires 'openpyxl'. Add it to requirements.txt or use Google Sheets/CSV.")
+            st.error("Excel reading requires 'openpyxl'. Add to requirements.txt or use Google Sheets/CSV.")
         except Exception as e:
             st.error(f"Could not read Excel: {e}")
 
 else:
-    st.caption("Upload 'Schedule.csv', 'RouteMaster.csv' (or 'Route Master.csv'), 'Config.csv' (optional: 'Rules.csv')")
+    st.caption("Upload 'Schedule.csv', 'RouteMaster.csv' (or 'Route Master.csv'/'Routemaster.csv'), 'Config.csv' (optional: 'Rules.csv')")
     files = st.file_uploader("Upload CSVs", type=["csv"], accept_multiple_files=True)
     if files:
         name_map = {f.name.lower(): f for f in files}
@@ -214,7 +191,7 @@ if not schedule.empty:
         schedule["Meet Location"] = schedule["Notes"].apply(infer_meet_location)
 
 # -----------------------------
-# Display + checks (same as before)
+# Display + checks
 # -----------------------------
 st.subheader("Schedule")
 st.dataframe(schedule.fillna(""), use_container_width=True, hide_index=True)
@@ -228,7 +205,11 @@ for _, r in schedule.iterrows():
     names = {n for n in names if n and n.lower() != "no run"}
     for n in names:
         pairs.append((d, n))
-use_counts = (pd.DataFrame(pairs, columns=["Date","Route"]).groupby("Route")["Date"].nunique().sort_values(ascending=False))
+
+use_counts = (pd.DataFrame(pairs, columns=["Date","Route"])
+              .groupby("Route")["Date"].nunique()
+              .sort_values(ascending=False))
+
 overused = use_counts[use_counts > overused_threshold].rename("Uses")
 overused_df = overused.rename_axis("Route").reset_index()
 
@@ -240,17 +221,11 @@ if not route_master.empty and "Route Name" in route_master.columns:
     never_used_df = pd.DataFrame({"Route": never_used})
 
 # Season mismatches
-def in_dark(dt):
-    start_md = (dark_start.month, dark_start.day)
-    end_md = (dark_end.month, dark_end.day)
-    m, d = dt.month, dt.day
-    return (m, d) >= start_md and (m, d) <= end_md if start_md <= end_md else ((m, d) >= start_md or (m, d) <= end_md)
-
 violations = []
 for _, r in schedule.iterrows():
     d = r.get("Date (Thu)")
     if pd.isna(d): continue
-    is_dark = in_dark(pd.to_datetime(d))
+    is_dark = in_dark_season(pd.to_datetime(d), dark_start, dark_end)
     for side in ["1","2"]:
         nm = clean(r.get(f"Route {side} - Name"))
         ter = clean(r.get(f"Route {side} - Terrain (Road/Trail/Mixed)"))
@@ -267,10 +242,15 @@ with c3: st.metric("Season mismatches", int(season_df.shape[0] if not season_df.
 
 st.markdown("### Overused")
 st.dataframe(overused_df if not overused_df.empty else pd.DataFrame([{"Status":"None ✅"}]), use_container_width=True, hide_index=True)
+to_csv_download(overused_df, "overused_routes.csv", "Overused Routes (CSV)")
+
 st.markdown("### Never used (ignoring 'No run')")
 st.dataframe(never_used_df if not never_used_df.empty else pd.DataFrame([{"Status":"None ✅"}]), use_container_width=True, hide_index=True)
+to_csv_download(never_used_df, "never_used_routes.csv", "Never Used Routes (CSV)")
+
 st.markdown("### Season mismatches")
 st.dataframe(season_df if not season_df.empty else pd.DataFrame([{"Status":"None ✅"}]), use_container_width=True, hide_index=True)
+to_csv_download(season_df, "season_mismatches.csv", "Season Mismatches (CSV)")
 
 st.divider()
-st.caption("Tabs accepted for Route Master: 'Route Master', 'RouteMaster', or 'Routemaster'.")
+st.caption("Accepted Route Master tab names: 'Route Master', 'RouteMaster', 'Routemaster'.")
