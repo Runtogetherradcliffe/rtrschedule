@@ -1,8 +1,7 @@
 
 import io, re, time, urllib.parse, pandas as pd, requests, streamlit as st
 
-import streamlit as st, requests
-
+# --- Capture Strava token from query on this page (works after redirect) ---
 def capture_strava_token_from_query():
     if st.session_state.get("strava_token"):
         return
@@ -27,6 +26,7 @@ def capture_strava_token_from_query():
         data = resp.json()
         st.session_state["strava_token"] = data.get("access_token")
         st.session_state["strava_athlete"] = data.get("athlete", {})
+        # Remove ?code from URL
         qp = dict(st.query_params)
         if "code" in qp:
             del qp["code"]
@@ -39,6 +39,8 @@ def capture_strava_token_from_query():
 
 st.set_page_config(page_title="Route Links & GPX", page_icon="🗺️", layout="wide")
 st.title("🗺️ Route Links & GPX — Validate & Fetch (Strava-aware)")
+
+# Capture token if redirected here after OAuth
 capture_strava_token_from_query()
 
 def clean(x):
@@ -95,8 +97,22 @@ def try_get_public(u, timeout=15):
         out["error"] = str(e)
         return out
 
-# NEW: validate Strava routes with API when token is present
-def strava_route_status_via_api(route_id, token):
+# ---- Strava detection & API helpers ----
+STRAVA_ROUTE_ID_RE = re.compile(r"(?:^|/)(?:routes|routes/view)/(\d+)(?:[/?#].*)?$", re.I)
+
+def is_strava_route_url(u: str) -> bool:
+    if not u: return False
+    lu = u.lower()
+    return ("strava.com" in lu) and ("/routes/" in lu)
+
+def extract_route_id(u: str, source_id: str) -> str:
+    m = STRAVA_ROUTE_ID_RE.search(u or "")
+    if m: return m.group(1)
+    if source_id and source_id.isdigit():
+        return source_id
+    return ""
+
+def strava_route_status_via_api(route_id: str, token: str) -> str:
     try:
         r = requests.get(
             "https://www.strava.com/api/v3/routes/{}".format(route_id),
@@ -105,24 +121,13 @@ def strava_route_status_via_api(route_id, token):
         )
         if r.status_code == 200:
             return "OK (API)"
-        elif r.status_code == 401:
+        if r.status_code == 401:
             return "Unauthorized (token/scope)"
-        elif r.status_code == 404:
+        if r.status_code == 404:
             return "Not Found/No Access"
-        else:
-            return "API error {}".format(r.status_code)
+        return "API error {}".format(r.status_code)
     except Exception as e:
         return "API error: {}".format(e)
-
-def classify(u, info, token_present):
-    if "strava.com/routes/" in u.lower() and not token_present:
-        return "Needs Auth/Not Public"
-    if not info.get("ok"):
-        return "Rate-limited (try again)" if info.get("status") == 429 else "Broken/Unreachable"
-    final = (info.get("final_url") or "").lower()
-    if "strava.com/login" in final or "strava.com/session" in final:
-        return "Needs Auth/Not Public"
-    return "OK"
 
 mode = st.radio("Load from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"], horizontal=True)
 
@@ -172,17 +177,18 @@ for _, row in sched.iterrows():
     for i, side in enumerate(["1","2"]):
         nm = clean(row[r_names[i]])
         lt = clean(row[r_types[i]])
-        url = clean(row[r_urls[i]])
+        url = make_https(clean(row[r_urls[i]]))
         sid = clean(row[r_srcid[i]]) if r_srcid[i] else ""
         if not nm or nm.lower() == "no run":
             continue
         if (lt.lower().startswith("strava") and sid.isdigit() and (not url or url.isdigit())):
             url = "https://www.strava.com/routes/{}".format(sid)
-        url = make_https(url)
         rows_long.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Source ID": sid})
 
 links_df = pd.DataFrame(rows_long)
 st.write("Found {} route link entries from the Schedule.".format(len(links_df)))
+
+debug = st.checkbox("Show debug for first 5 rows", value=False)
 
 st.subheader("Validate Links")
 limit = st.slider("Limit rows to validate", min_value=10, max_value=len(links_df), value=min(200, len(links_df)), step=10)
@@ -192,26 +198,35 @@ token = st.session_state.get("strava_token")
 token_present = bool(token)
 
 out_rows = []
-for _, r in subset.iterrows():
+for idx, r in subset.iterrows():
     u = clean(r["URL"]); lt = clean(r["Link Type"]); sid = clean(r["Source ID"])
+    row_debug = {}
+    if debug and idx < 5:
+        row_debug["raw_url"] = u
+        row_debug["link_type"] = lt
+        row_debug["source_id"] = sid
+
     if not u:
-        out_rows.append({**r, "Status":"Missing URL","HTTP":"","Content-Type":"","Final URL":""})
+        out_rows.append({**r, "Status":"Missing URL","HTTP":"","Content-Type":"","Final URL":"","Debug":row_debug if debug else ""})
         continue
-    # If Strava route and token present, validate via API first
-    if token_present and ("strava.com/routes/" in u.lower() or lt.lower().startswith("strava")):
-        rid = None
-        m = re.search(r"/routes/(\d+)", u, flags=re.I)
-        if m: rid = m.group(1)
-        if not rid and sid.isdigit(): rid = sid
+
+    if token_present and is_strava_route_url(u):
+        rid = extract_route_id(u, sid)
+        if debug and idx < 5:
+            row_debug["route_id_extracted"] = rid
         if rid:
             api_status = strava_route_status_via_api(rid, token)
-            out_rows.append({**r, "Status": api_status, "HTTP":"", "Content-Type":"", "Final URL": u})
+            out_rows.append({**r, "Status": api_status, "HTTP":"", "Content-Type":"", "Final URL": u, "Debug":row_debug if debug else ""})
             time.sleep(0.05)
             continue
-    # Otherwise do a public fetch check
+
     info = try_get_public(u)
-    status = classify(u, info, token_present)
-    out_rows.append({**r, "Status":status,"HTTP":info.get("status"),"Content-Type":info.get("content_type"),"Final URL":info.get("final_url")})
+    final_status = "Needs Auth/Not Public" if ("strava.com" in u.lower() and "/routes/" in u.lower() and not token_present) else (
+        "Rate-limited (try again)" if info.get("status")==429 else ("OK" if info.get("ok") else "Broken/Unreachable")
+    )
+    if debug and idx < 5:
+        row_debug["public_fetch"] = {"status": info.get("status"), "final_url": info.get("final_url")}
+    out_rows.append({**r, "Status":final_status,"HTTP":info.get("status"),"Content-Type":info.get("content_type"),"Final URL":info.get("final_url"), "Debug":row_debug if debug else ""})
     time.sleep(0.05)
 
 report_df = pd.DataFrame(out_rows).sort_values("Date")
@@ -219,7 +234,7 @@ st.dataframe(report_df, use_container_width=True, hide_index=True)
 st.download_button("⬇️ Download validation report (CSV)", data=report_df.to_csv(index=False).encode("utf-8"), file_name="route_link_validation.csv", mime="text/csv")
 
 st.subheader("Export GPX")
-# Direct GPX
+
 gpx_ok = report_df[(report_df["Status"].str.contains("OK")) & (report_df["URL"].str.lower().str.contains(".gpx"))]
 if not gpx_ok.empty:
     pick = st.multiselect("Select direct-GPX routes to download", gpx_ok["Route Name"].tolist(), key="pick_gpx_direct")
@@ -236,9 +251,8 @@ if not gpx_ok.empty:
                     st.warning("Failed to download {}: {}".format(row["Route Name"], e))
         st.download_button("⬇️ Download GPX ZIP (direct)", data=buf.getvalue(), file_name="routes_gpx.zip", mime="application/zip")
 
-# Strava via API
 if token_present:
-    strava_routes = report_df[report_df["URL"].str.contains("strava.com/routes/")]
+    strava_routes = report_df[report_df["URL"].str.contains("strava.com") & report_df["URL"].str.contains("/routes/")]
     if not strava_routes.empty:
         st.markdown("#### Strava Routes via API")
         strava_routes = strava_routes.assign(**{"Route ID": strava_routes["URL"].str.extract(r"/routes/(\d+)").astype(str)})
