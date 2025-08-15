@@ -1,5 +1,5 @@
 # pages/route_metadata.py
-# Build: v2025.08.15-METADATA-1 (Validate + Fetch Distance/Elevation for Strava Routes)
+# Build: v2025.08.15-METADATA-3 (synthesize URL from Source ID when blank)
 
 import io
 import re
@@ -9,7 +9,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-BUILD_ID = "v2025.08.15-METADATA-1"
+BUILD_ID = "v2025.08.15-METADATA-3"
 
 # ----------------------------- OAuth capture ------------------------------
 def capture_strava_token_from_query():
@@ -136,17 +136,15 @@ def expand_sci_id(s: str) -> str:
     else:
         return digits
 
-def source_id_to_long_digits(s: str) -> str:
+def source_id_to_digits(s: str) -> str:
     expanded = expand_sci_id(s)
-    if expanded:
-        return expanded
-    return extract_digits(s)
+    return expanded if expanded else extract_digits(s)
 
 def extract_route_id(u: str, source_id: str) -> str:
     rid = extract_route_id_from_url(u)
     if rid:
         return rid
-    return source_id_to_long_digits(source_id)
+    return source_id_to_digits(source_id)
 
 # API helpers
 def strava_get_route(route_id: str, token: str):
@@ -155,12 +153,10 @@ def strava_get_route(route_id: str, token: str):
     return r
 
 def parse_route_metadata(route_json: dict) -> dict:
-    # Defensive parsing: Strava returns distance (m), elevation_gain (m), name, type, created_at, updated_at etc.
     dist_m = route_json.get("distance")
-    elev_m = route_json.get("elevation_gain") or route_json.get("elevation_gain_total") or route_json.get("elevation")  # fallbacks
+    elev_m = route_json.get("elevation_gain") or route_json.get("elevation_gain_total") or route_json.get("elevation")
     name = route_json.get("name")
     sport_type = route_json.get("type") or route_json.get("sport_type")
-    # convert distance to km (float) with 2 dp
     dist_km = None
     try:
         if dist_m is not None:
@@ -229,6 +225,7 @@ if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
     st.stop()
 
 # -------------------------- Flatten rows (long) -----------------------------
+synth_count = 0
 rows_long = []
 for _, row in sched.iterrows():
     d = row.get(date_col, "")
@@ -240,11 +237,20 @@ for _, row in sched.iterrows():
         if not nm or nm.lower() == "no run":
             continue
         url = make_https(url_raw)
-        rid = extract_route_id(url, sid_raw) if lt.lower().startswith("strava") else ""
+
+        # NEW: synthesize URL from Source ID when URL missing and Link Type mentions Strava
+        if (not url) and ("strava" in lt.lower() or "strava" in nm.lower()):
+            sid_digits = source_id_to_digits(sid_raw)
+            # accept both long and older short route IDs (>= 6 digits)
+            if len(sid_digits) >= 6:
+                url = f"https://www.strava.com/routes/{sid_digits}"
+                synth_count += 1
+
+        rid = extract_route_id(url, sid_raw) if ("strava" in lt.lower() or is_strava_route_url(url)) else ""
         rows_long.append({"Date": d, "Route Name": nm, "Side": side, "Link Type": lt, "URL": url, "Route ID": rid})
 
 links_df = pd.DataFrame(rows_long)
-st.write(f"Found {len(links_df)} route entries.")
+st.write(f"Found {len(links_df)} route entries. (Synthesized {synth_count} Strava URLs from Source IDs)")
 
 # ---------------------------- Validation & Metadata -------------------------
 st.subheader("Validate & Fetch Metadata")
@@ -258,17 +264,53 @@ delay = st.slider("Delay between API calls (seconds)", min_value=0.0, max_value=
 
 subset = links_df.iloc[start_at:start_at+limit].copy()
 
+def strava_get_route(route_id: str, token: str):
+    url = f"https://www.strava.com/api/v3/routes/{route_id}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+    return r
+
+def parse_route_metadata(route_json: dict) -> dict:
+    dist_m = route_json.get("distance")
+    elev_m = route_json.get("elevation_gain") or route_json.get("elevation_gain_total") or route_json.get("elevation")
+    name = route_json.get("name")
+    sport_type = route_json.get("type") or route_json.get("sport_type")
+    dist_km = None
+    try:
+        if dist_m is not None:
+            dist_km = round(float(dist_m) / 1000.0, 2)
+    except Exception:
+        dist_km = None
+    elev_m_val = None
+    try:
+        if elev_m is not None:
+            elev_m_val = round(float(elev_m), 1)
+    except Exception:
+        elev_m_val = None
+    return {
+        "Route Name (API)": name,
+        "Distance (km)": dist_km,
+        "Elevation Gain (m)": elev_m_val,
+        "Sport/Type": sport_type,
+    }
+
 out_rows = []
 hit_429 = False
 prog = st.progress(0, text="Working...")
 
 for i, (_, r) in enumerate(subset.iterrows(), start=1):
     url = r["URL"]; lt = r["Link Type"]; rid = r["Route ID"]
-    status = "Skipped (non-Strava)"
+    status = None
     dist_km = None; elev_m = None; name_api = None; sport_type = None
 
-    if url and is_strava_route_url(url) and rid and token:
-        # cache first
+    if not url and "strava" not in lt.lower():
+        status = "Non-Strava link (no URL)"
+    elif url and not is_strava_route_url(url):
+        status = "Non-Strava link (URL)"
+    elif not rid:
+        status = "Missing route id (URL/Source ID)"
+    elif not token:
+        status = "Needs Strava login"
+    else:
         cache = st.session_state["route_json_cache"]
         if rid in cache:
             data = cache[rid]
@@ -303,7 +345,7 @@ for i, (_, r) in enumerate(subset.iterrows(), start=1):
         "Side": r["Side"],
         "URL": url,
         "Route ID": rid,
-        "Status": status,
+        "Status": status or "Skipped",
         "Distance (km)": dist_km,
         "Elevation Gain (m)": elev_m,
         "Sport/Type": sport_type,
@@ -327,4 +369,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.info("Tip: paste/import the 'Distance (km)' and 'Elevation Gain (m)' columns back into your Schedule. Keep Source ID columns as Plain text to avoid scientific notation.")
+st.info("Tip: keep Source ID columns as Plain text in Sheets. This page now synthesizes Strava URLs from Source IDs when URL cells are blank.")
