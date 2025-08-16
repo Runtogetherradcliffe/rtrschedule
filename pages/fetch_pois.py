@@ -1,7 +1,6 @@
 
 # pages/fetch_pois.py
-# Build: v2025.08.16-POI-GSHEET (Google Sheet integrated)
-
+# Build: v2025.08.16-POI-GSHEET-ONROUTE
 import io
 import re
 import time
@@ -11,9 +10,9 @@ import requests
 import streamlit as st
 from math import radians, sin, cos, asin, sqrt
 
-st.set_page_config(page_title="📍 Route POIs — LocationIQ", page_icon="📍", layout="wide")
-st.title("📍 Route POIs — LocationIQ")
-st.caption("Build: v2025.08.16-POI-GSHEET")
+st.set_page_config(page_title="📍 Route POIs — LocationIQ (On-route)", page_icon="📍", layout="wide")
+st.title("📍 Route POIs — LocationIQ (On-route)")
+st.caption("Build: v2025.08.16-POI-GSHEET-ONROUTE — Roads & landmarks strictly from points sampled *on* the route polyline.")
 
 # ----------------------------- Helpers ----------------------------------
 def clean(x):
@@ -27,7 +26,6 @@ def extract_sheet_id(url):
     return m.group(1) if m else None
 
 def load_google_sheet_csv(sheet_id, sheet_name):
-    # Pull a tab as CSV via gviz
     u = (
         f"https://docs.google.com/spreadsheets/d/{sheet_id}"
         "/gviz/tq?tqx=out:csv&sheet=" + urllib.parse.quote(sheet_name, safe="")
@@ -142,7 +140,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
     c = 2 * asin(sqrt(a))
     return R * c
 
-def sample_polyline(coords, step_m=400, max_points=60):
+def sample_polyline(coords, step_m=600, max_points=36):
     if not coords:
         return []
     samples = [coords[0]]
@@ -178,13 +176,13 @@ def locationiq_reverse(lat: float, lon: float, api_key: str):
         "lon": f"{lon:.6f}",
         "format": "json",
         "normalizeaddress": 1,
-        "zoom": 16,
+        "zoom": 18,  # tighter to road level
     }
     return requests.get(u, params=params, timeout=25)
 
 # ---------------------------- Load from Google Sheet ----------------------
 st.subheader("Load your Schedule (Google Sheet)")
-gs_url = st.text_input("Google Sheet URL (same one used on other pages)")
+gs_url = st.text_input("Google Sheet URL")
 dfs = None
 if gs_url:
     try:
@@ -217,7 +215,7 @@ if not date_col or not all(r_names) or not all(r_types) or not all(r_urls):
     st.error("Schedule is missing expected columns for route names/link types/URLs.")
     st.stop()
 
-# Flatten
+# Flatten rows & synthesize Strava URLs if missing
 synthesized = 0
 rows = []
 for _, row in sched.iterrows():
@@ -230,7 +228,6 @@ for _, row in sched.iterrows():
         if not nm or nm.lower() == "no run":
             continue
         url = make_https(url_raw)
-        # synthesize when blank
         if (not url) and ("strava" in (lt or "").lower() or "strava" in (nm or "").lower()):
             sid_digits = source_id_to_digits(sid_raw)
             if len(sid_digits) >= 6:
@@ -244,7 +241,7 @@ st.write(f"Found {len(df_links)} route entries. (Synthesized {synthesized} Strav
 
 # --------------------------- Controls ------------------------------------
 st.subheader("POI Fetch Controls")
-access_token = st.session_state.get("strava_token")  # should be the string token used on your other pages
+access_token = st.session_state.get("strava_token")
 if not access_token:
     st.info("Connect your Strava account on the OAuth page first.")
 liq_key = get_liq_key()
@@ -253,49 +250,63 @@ if not liq_key:
 
 start_at = st.number_input("Start at row", min_value=0, max_value=max(0, len(df_links)-1), value=0, step=1)
 limit = st.slider("Rows in this pass", min_value=10, max_value=len(df_links), value=min(40, len(df_links)), step=10)
-step_m = st.slider("Sampling interval (meters)", min_value=100, max_value=1000, value=400, step=50)
-max_pts = st.slider("Max sampled points per route", min_value=10, max_value=120, value=60, step=10)
-delay_route = st.slider("Delay between routes (seconds)", min_value=0.0, max_value=2.0, value=0.25, step=0.05)
-delay_liq = st.slider("Delay between LocationIQ calls (seconds)", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
+step_m = st.slider("Sampling interval (meters)", min_value=200, max_value=1200, value=600, step=50)
+max_pts = st.slider("Max sampled points per route", min_value=12, max_value=60, value=36, step=4)
+delay_route = st.slider("Delay between routes (seconds)", min_value=0.0, max_value=2.0, value=0.35, step=0.05)
+delay_liq = st.slider("Delay between LocationIQ calls (seconds)", min_value=0.0, max_value=1.0, value=0.7, step=0.05)
 
 subset = df_links.iloc[start_at:start_at+limit].copy()
 
-def poi_label_from_place(p):
-    name = p.get("name") or p.get("display_name") or ""
-    cat = p.get("type") or p.get("category") or p.get("class")
-    if name and cat:
-        return f"{name} ({cat})"
-    if name:
-        return name
-    return p.get("address", {}).get("suburb") or p.get("address", {}).get("road") or "Unnamed"
+# Allowed landmark classes/types (OSM/LocationIQ schema)
+ALLOWED_CLASSES = {
+    "leisure": {"park", "common", "nature_reserve"},
+    "natural": {"wood", "heath", "grassland", "scrub"},
+    "waterway": {"river", "canal"},
+    "landuse": {"forest"},
+    "water": {"reservoir", "lake"},
+    "amenity": {"stadium", "sports_centre"},
+    "tourism": {"attraction"},
+}
 
-def summarize_pois(pois):
-    labels = []
-    cats = {}
-    seen = set()
-    for p in pois:
-        lbl = poi_label_from_place(p)
-        if lbl not in seen:
-            seen.add(lbl)
-            labels.append(lbl)
-        cat = p.get("type") or p.get("category") or p.get("class")
-        if cat:
-            cats[cat] = cats.get(cat, 0) + 1
-    topcats = ", ".join([f"{k}:{v}" for k, v in sorted(cats.items(), key=lambda x: x[1], reverse=True)[:5]])
-    summary = "; ".join(labels[:12])
-    return summary, topcats
+def is_allowed_landmark(p):
+    cls = p.get("class")
+    typ = p.get("type")
+    if not cls or not typ:
+        return False
+    return cls in ALLOWED_CLASSES and typ in ALLOWED_CLASSES[cls]
+
+def extract_road_names(p):
+    a = p.get("address", {}) or {}
+    candidates = []
+    for key in ("road", "pedestrian", "footway", "path", "cycleway"):
+        v = a.get(key)
+        if v:
+            candidates.append(v)
+    return candidates
+
+def poi_label(p):
+    name = p.get("name") or p.get("display_name") or ""
+    typ = p.get("type") or p.get("category") or p.get("class")
+    if name and typ:
+        return f"{name} ({typ})"
+    return name or ""
 
 # --------------------------- Fetch POIs ----------------------------------
-st.subheader("Fetch POIs")
+st.subheader("Fetch POIs (on-route only)")
 out_rows = []
 prog = st.progress(0, text="Ready…")
 total = len(subset)
 
+tot_calls = 0
+ok_calls = 0
+throttled = 0
+errs = 0
+
 for i, (_, r) in enumerate(subset.iterrows(), start=1):
     url = r["URL"]; rid = r["Route ID"]
     status = "Skipped"
-    poi_summary = None
-    topcats = None
+    roads = set()
+    landmarks = set()
     samples_used = 0
 
     if url and is_strava_route_url(url) and rid and access_token and liq_key:
@@ -311,21 +322,30 @@ for i, (_, r) in enumerate(subset.iterrows(), start=1):
                     coords = []
                 pts = sample_polyline(coords, step_m=step_m, max_points=max_pts)
                 samples_used = len(pts)
-                pois = []
                 for (lat, lon) in pts:
                     try:
                         rr = locationiq_reverse(lat, lon, liq_key)
+                        tot_calls += 1
                         if rr.status_code == 200:
-                            pois.append(rr.json())
+                            ok_calls += 1
+                            p = rr.json()
+                            # On-route extraction: roads from the exact sample point only
+                            for rn in extract_road_names(p):
+                                roads.add(rn)
+                            # Landmarks only if class/type allowed
+                            if is_allowed_landmark(p):
+                                lbl = poi_label(p)
+                                if lbl:
+                                    landmarks.add(lbl)
+                        elif rr.status_code in (402, 429):  # quota/rate
+                            throttled += 1
+                        else:
+                            errs += 1
                         if delay_liq > 0:
                             time.sleep(delay_liq)
                     except Exception:
-                        pass
-                if pois:
-                    poi_summary, topcats = summarize_pois(pois)
-                    status = "OK"
-                else:
-                    status = "No POIs found"
+                        errs += 1
+                status = "OK" if (roads or landmarks) else "No POIs found"
             else:
                 status = "No polyline in Strava route"
         elif resp.status_code == 404:
@@ -354,8 +374,8 @@ for i, (_, r) in enumerate(subset.iterrows(), start=1):
         "URL": url,
         "Route ID": rid,
         "Status": status,
-        "POI Summary": poi_summary,
-        "Top Categories": topcats,
+        "Roads (on-route)": "; ".join(sorted(roads)) if roads else None,
+        "Landmarks (on-route)": "; ".join(sorted(landmarks)) if landmarks else None,
         "Samples Used": samples_used,
     })
 
@@ -369,10 +389,13 @@ res = pd.DataFrame(out_rows)
 st.dataframe(res, use_container_width=True, hide_index=True)
 
 st.download_button(
-    "⬇️ Download POIs (CSV)",
+    "⬇️ Download Roads & Landmarks (CSV)",
     data=res.to_csv(index=False).encode("utf-8"),
-    file_name="route_pois.csv",
+    file_name="route_roads_landmarks.csv",
     mime="text/csv",
 )
 
-st.info("Tip: Uses the same Google Sheet link as your other pages. Increase delays if you see throttling; adjust sampling for more/less detail.")
+st.markdown(
+    f"**LocationIQ calls:** {ok_calls} OK · {throttled} throttled · {errs} errors · Total: {tot_calls}."
+)
+st.info("Tip: If throttled > 0, increase 'Delay between LocationIQ calls' and/or reduce 'Max sampled points per route'.")
