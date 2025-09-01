@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-17 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-18 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -177,7 +177,7 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-17 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-18 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
@@ -417,6 +417,8 @@ idx_choice = st.selectbox("Date", options=opt_idx, format_func=_fmt, index=0 if 
 if idx_choice is None:
     st.stop()
 row = future_rows.loc[idx_choice]
+with st.expander("Debug: date row", expanded=False):
+    st.write({"raw_cell": row.get(date_col), "_dateparsed": row.get("_dateparsed")})
 
 def try_float(s):
     """Extract first numeric value from strings like '8km', '1,200 m', '75m', or plain numbers."""
