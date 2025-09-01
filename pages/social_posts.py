@@ -8,6 +8,7 @@ import urllib.parse
 from datetime import datetime
 import pandas as pd
 import requests
+import os
 import hashlib
 import streamlit as st
 
@@ -208,6 +209,50 @@ def _sample_points(polyline, max_pts=10):
 
 
 
+
+def get_locationiq_key(*, debug: bool = False):
+    """
+    Try a bunch of places/aliases for the LocationIQ API key so we match other pages:
+    - st.secrets top-level: LOCATIONIQ_API_KEY / LOCATIONIQ_TOKEN / LOCATIONIQ_KEY / locationiq_api_key
+    - st.secrets nested: [locationiq].api_key / token / key
+    - st.session_state: same aliases
+    - os.environ: LOCATIONIQ_API_KEY / LOCATIONIQ_TOKEN
+    Returns key (and optionally a debug list of where it was found).
+    """
+    candidates = []
+    # secrets (top-level)
+    try:
+        s = st.secrets
+        for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN","LOCATIONIQ_KEY","locationiq_api_key","locationiq_token","locationiq_key"]:
+            v = s.get(k, None)
+            candidates.append(("secrets", k, v))
+        # secrets (nested sections)
+        for sect in ["locationiq","LOCATIONIQ"]:
+            sec = s.get(sect, None)
+            if isinstance(sec, dict):
+                for k in ["api_key","token","key"]:
+                    v = sec.get(k, None)
+                    candidates.append((f"secrets[{sect}]", k, v))
+    except Exception:
+        pass
+    # session_state
+    try:
+        for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN","LOCATIONIQ_KEY","locationiq_api_key","locationiq_token","locationiq_key"]:
+            v = st.session_state.get(k, None)
+            candidates.append(("session_state", k, v))
+    except Exception:
+        pass
+    # environment
+    for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN"]:
+        v = os.environ.get(k, None)
+        candidates.append(("env", k, v))
+
+    # choose first truthy
+    for origin, name, val in candidates:
+        if val:
+            return (str(val), {"source": origin, "name": name}) if debug else str(val)
+    return (None, {"source": None, "name": None}) if debug else None
+
 def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None, debug: bool = False):
     """
     Return up to 3 highlights drawn from features along the route.
@@ -222,7 +267,7 @@ def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None
         if b not in base_order:
             base_order.append(b)
 
-    key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
+    key, key_src = get_locationiq_key(debug=True)
     if not key:
         return ([], {"error": "no_api_key"}) if debug else []
 
@@ -379,6 +424,8 @@ def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None
             "filtered": dedup[:10],
             "final_pois": pois,
             "bases": base_order,
+            "api_key_source": key_src,
+
         }
         return pois, report
     return pois
