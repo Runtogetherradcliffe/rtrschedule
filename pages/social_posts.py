@@ -274,11 +274,15 @@ def get_locationiq_key(*, debug: bool = False):
             return (str(val), {"source": origin, "name": name}) if debug else str(val)
     return (None, {"source": None, "name": None}) if debug else None
 
+
 def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None, debug: bool = False):
     """
     Return up to 3 highlights drawn from features along the route.
-    - Caches reverse geocoding results (6h) and final POIs per route/polyline hash.
-    - If debug=True, returns (pois, report) where report describes the pipeline.
+    Improvements:
+      - denser sampling (up to ~50 points)
+      - reverse at zooms 18,17,16,15,14
+      - request extratags and parse class/type (waterway/natural/leisure)
+      - recognise 'wood', 'forest', 'canal', 'towpath' explicitly
     """
     import time
 
@@ -290,7 +294,172 @@ def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None
 
     key, key_src = get_locationiq_key(debug=True)
     if not key:
-        return ([], {"error": "no_api_key"}) if debug else []
+        return ([], {"error": "no_api_key", "api_key_source": key_src}) if debug else []
+
+    # Denser sampling: up to 50 points along the line
+    pts = sample_points or _sample_points(polyline, max_pts=50)
+    if not pts:
+        return ([], {"error": "no_points", "api_key_source": key_src}) if debug else []
+
+    # Address keys we consider "on route"
+    ONROUTE_KEYS = [
+        "road","footway","pedestrian","path","cycleway","bridleway","trail","steps",
+        "bridge","river","waterway","canal","park","leisure","natural"
+    ]
+    PRIORITY_WORDS = ["trail","canal","river","park","bridge","viaduct","towpath","nature","reserve","wood","woods","forest"]
+    ROAD_WORDS = ["road","lane","street","way","drive","avenue","rd","ln","st"]
+
+    if hasattr(st, "cache_data"):
+        @st.cache_data(show_spinner=False, ttl=21600)
+        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "namedetails": 1,
+                        "extratags": 1,
+                        "zoom": zoom,
+                    },
+                    timeout=12,
+                )
+                if not r.ok:
+                    return None
+                return r.json()
+            except Exception:
+                return None
+    else:
+        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "namedetails": 1,
+                        "extratags": 1,
+                        "zoom": zoom,
+                    },
+                    timeout=12,
+                )
+                if not r.ok:
+                    return None
+                return r.json()
+            except Exception:
+                return None
+
+    def extract_names(payload: dict) -> list[str]:
+        out = []
+        addr = payload.get("address") or {}
+        namedetails = payload.get("namedetails") or {}
+        disp = payload.get("display_name") or ""
+        klass = (payload.get("class") or "").lower()
+        typ = (payload.get("type") or "").lower()
+        xtra = payload.get("extratags") or {}
+
+        # 0) If the feature itself is a canal/river/wood/park, take its display or name first
+        if klass in ("waterway","natural","leisure"):
+            if typ in ("canal","river","stream","wood","forest","park","nature_reserve","common"):
+                n0 = (namedetails.get("name") or xtra.get("name") or xtra.get("official_name")
+                      or (disp.split(",")[0].strip() if disp else ""))
+                if n0 and n0.lower() != "unnamed road":
+                    out.append(n0)
+
+        # 1) From address keys (roads/paths first)
+        for k in ONROUTE_KEYS:
+            v = addr.get(k)
+            if v and v.strip() and v.lower() != "unnamed road":
+                out.append(v.strip())
+
+        # 2) Named feature
+        nm = namedetails.get("name") or xtra.get("name") or xtra.get("official_name")
+        if nm and nm.strip():
+            out.append(nm.strip())
+
+        # 3) Fallback: first segment of display_name
+        if disp:
+            first = disp.split(",")[0].strip()
+            if first and first.lower() != "unnamed road":
+                out.append(first)
+        return out
+
+    names: list[str] = []
+    hits = 0
+    calls = 0
+    per_point: list[dict] = []
+    for (lat, lon) in pts:
+        point_report = {"lat": lat, "lon": lon, "tried": [], "got": None}
+        got = False
+        for b in base_order:
+            for z in (18,17,16,15,14):
+                calls += 1
+                payload = _liq_reverse_cached(b, key, lat, lon, z)
+                point_report["tried"].append({"base": b, "zoom": z, "ok": payload is not None})
+                if payload:
+                    cands = extract_names(payload)
+                    if cands:
+                        names.extend(cands)
+                    point_report["got"] = (cands[:3] if cands else [])
+                    hits += 1
+                    got = True
+                    break
+            if got:
+                break
+        per_point.append(point_report)
+        if hits >= 16:  # enough per route
+            break
+        time.sleep(0.25)  # gentle throttle with cache
+
+    # Filtering & ranking
+    clean = []
+    for n in names:
+        s = n.strip()
+        if not s or s.lower() == "unnamed road":
+            continue
+        l = s.lower()
+        ok = any(w in l for w in PRIORITY_WORDS) or any(w in l for w in ROAD_WORDS) or (len(s.split()) >= 2 and s[0].isupper())
+        if ok:
+            clean.append(s)
+
+    # Ordered de-dup
+    seen=set(); dedup=[]
+    for s in clean:
+        k=s.lower()
+        if k in seen:
+            continue
+        seen.add(k); dedup.append(s)
+
+    def score(s: str) -> int:
+        l = s.lower()
+        if any(w in l for w in ["trail","canal","river","park","bridge","viaduct","towpath","nature","reserve","wood","forest"]):
+            return 0
+        return 1
+
+    dedup.sort(key=score)
+    pois = dedup[:3]
+
+    report = {
+        "rid": rid,
+        "points_considered": len(pts),
+        "reverse_calls": calls,
+        "points_hit": hits,
+        "raw_names": names[:40],
+        "filtered": dedup[:12],
+        "final_pois": pois,
+        "bases": base_order,
+        "api_key_source": key_src,
+    }
+    return (pois, report) if debug else pois
+
 
     pts = sample_points or _sample_points(polyline, max_pts=30)
     if not pts:
