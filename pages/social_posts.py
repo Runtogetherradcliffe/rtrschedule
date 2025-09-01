@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-12 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-14 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -147,6 +147,22 @@ def fetch_locationiq_highlights(polyline):
     return uniq[:3]
 from math import radians, sin, cos, asin, sqrt
 from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+def ordinal(n: int) -> str:
+    n = int(n)
+    if 11 <= (n % 100) <= 13:
+        suff = "th"
+    else:
+        suff = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suff}"
+
+def format_full_uk_date(d: pd.Timestamp) -> str:
+    # Expect naive datetime64[ns]; convert to Timestamp if needed
+    ts = pd.Timestamp(d)
+    return f"{ts.strftime('%A')} {ordinal(ts.day)} {ts.strftime('%B')}"
+
+
 
 # Try to import shared settings (optional)
 try:
@@ -157,10 +173,28 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-12 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-14 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
+
+from datetime import timedelta
+def to_thursday_date(ts):
+    try:
+        d = pd.to_datetime(ts, errors="coerce", dayfirst=True)
+    except Exception:
+        d = pd.to_datetime(ts, errors="coerce")
+    if pd.isna(d):
+        return None
+    # Ensure naive datetime (date-only OK)
+    try:
+        d = d.tz_localize(None)
+    except Exception:
+        pass
+    # 0=Mon ... 3=Thu
+    wd = int(d.weekday())
+    offset = (3 - wd) % 7
+    return (d + pd.to_timedelta(offset, unit="D"))
 def clean(x):
     return "" if pd.isna(x) else str(x).strip()
 
@@ -245,12 +279,18 @@ def extract_route_id(url: str, source_id: str) -> str:
 # Hilliness descriptors with variation
 def hilliness_blurb(dist_km, elev_m):
     phrases = {
-        "flat": ["flat as a pancake! :pancakes:", "fast and flat :checkered_flag:", "pan-flat cruise :dash:"],
-        "rolling": ["gently rolling :herb:", "undulating and friendly :seedling:", "rolling countryside vibes :deciduous_tree:"],
-        "hilly": ["a hilly tester! :mountain:", "spicy climbs ahead :hot_pepper:", "some punchy hills :mountain_railway:"],
+        "flat": ["flat and friendly 🏁", "fast & flat 🏁", "pan-flat cruise 💨"],
+        "rolling": ["gently rolling 🌱", "undulating and friendly 🌿", "rolling countryside vibes 🌳"],
+        "hilly": ["a hilly tester! ⛰️", "spicy climbs ahead 🌶️", "some punchy hills 🚵"],
     }
     if not dist_km or not elev_m:
         return random.choice(["a great midweek spin", "perfect for all paces", "midweek miles made easy"])
+    try:
+        m_per_km = float(elev_m)/max(float(dist_km), 0.1)
+    except Exception:
+        return random.choice(["a great midweek spin", "perfect for all paces", "midweek miles made easy"])
+    key = "flat" if m_per_km < 10 else ("rolling" if m_per_km < 20 else "hilly")
+    return random.choice(phrases[key])
     try:
         m_per_km = float(elev_m)/max(float(dist_km), 0.1)
     except Exception:
@@ -364,12 +404,15 @@ if "_dateval" not in sched.columns or "_dateparsed" not in sched.columns:
 now_london = pd.Timestamp.now(tz="Europe/London").normalize()
 today_val = now_london.value
 future_rows = sched[sched["_dateval"] >= today_val]
-date_options = future_rows[date_col].astype(str).tolist()
-date_choice = st.selectbox("Date", options=date_options, index=0 if date_options else None)
-if not date_choice:
+future_rows = future_rows.sort_values("_dateparsed")
+opt_idx = future_rows.index.tolist()
+def _fmt(idx):
+    d = future_rows.loc[idx, "_dateparsed"]
+    return format_full_uk_date(d)
+idx_choice = st.selectbox("Date", options=opt_idx, format_func=_fmt, index=0 if opt_idx else None)
+if idx_choice is None:
     st.stop()
-
-row = future_rows[future_rows[date_col].astype(str) == str(date_choice)].iloc[0]
+row = future_rows.loc[idx_choice]
 
 def try_float(s):
     """Extract first numeric value from strings like '8km', '1,200 m', '75m', or plain numbers."""
@@ -459,7 +502,7 @@ is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
 has_social = has_kw(notes, "social", "pub", "after")
 
 # Build friendly copy
-date_str = pd.to_datetime(str(date_choice), errors="coerce", dayfirst=True).strftime("%a %d %b")
+date_str = format_full_uk_date(row["_dateparsed"])
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {(meet_loc or get_cfg('MEET_LOC_DEFAULT', 'Radcliffe Market')).title()}"
 time_line = "🕖 We set off at 7:00pm"
