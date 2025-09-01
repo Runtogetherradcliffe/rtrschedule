@@ -1154,6 +1154,20 @@ except Exception as _e:
 
 
 
+
+# --- Ensure routes carry POIs into the message even if enrichment skipped setting them ---
+try:
+    if poi_debug:
+        rid2pois = {}
+        for rep in poi_debug:
+            if isinstance(rep, dict) and rep.get("rid") and rep.get("final_pois"):
+                rid2pois[rep["rid"]] = rep["final_pois"]
+        for r in routes:
+            if r.get("rid") and (not r.get("pois")) and r.get("rid") in rid2pois:
+                r["pois"] = ", ".join(rid2pois[r["rid"]])
+except Exception:
+    pass
+
 with st.expander("Debug: POIs (per-route)", expanded=False):
     dbg = globals().get("poi_debug", [])
     try:
