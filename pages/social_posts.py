@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-18 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-19 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -177,7 +177,7 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-18 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-19 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
@@ -383,7 +383,7 @@ if not date_col or not all(r_names) or not all(r_urls):
     st.stop()
 
 # Future-only dropdown with default to next upcoming
-sched["_dateparsed"] = pd.to_datetime(sched[date_col], errors="coerce")
+sched["_dateonly"] = pd.to_datetime(sched[date_col], errors="coerce")
 today = pd.Timestamp.utcnow().normalize()
 # === Defensive date parsing: ensure _dateparsed and _dateval exist ===
 if "_dateval" not in sched.columns or "_dateparsed" not in sched.columns:
@@ -397,7 +397,7 @@ if "_dateval" not in sched.columns or "_dateparsed" not in sched.columns:
         except Exception:
             pass
     s = s.dt.normalize()
-    sched["_dateparsed"] = s
+    sched["_dateonly"] = s
     try:
         sched["_dateval"] = s.view("int64")
     except Exception:
@@ -409,16 +409,15 @@ now_london = pd.Timestamp.now(tz="Europe/London").normalize()
 today_val = now_london.value
 future_rows = sched[sched["_dateval"] >= today_val]
 future_rows = future_rows.sort_values("_dateparsed")
+future_rows = future_rows.sort_values("_dateonly")
 opt_idx = future_rows.index.tolist()
 def _fmt(idx):
-    d = future_rows.loc[idx, "_dateparsed"]
-    return format_full_uk_date(d)
+    return format_day_month_uk(pd.to_datetime(future_rows.loc[idx, "_dateonly"]))
 idx_choice = st.selectbox("Date", options=opt_idx, format_func=_fmt, index=0 if opt_idx else None)
 if idx_choice is None:
     st.stop()
 row = future_rows.loc[idx_choice]
-with st.expander("Debug: date row", expanded=False):
-    st.write({"raw_cell": row.get(date_col), "_dateparsed": row.get("_dateparsed")})
+
 
 def try_float(s):
     """Extract first numeric value from strings like '8km', '1,200 m', '75m', or plain numbers."""
@@ -508,7 +507,7 @@ is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
 has_social = has_kw(notes, "social", "pub", "after")
 
 # Build friendly copy
-date_str = format_day_month_uk(row["_dateparsed"])
+date_str = format_day_month_uk(pd.to_datetime(row["_dateonly"]))
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {(meet_loc or get_cfg('MEET_LOC_DEFAULT', 'Radcliffe Market')).title()}"
 time_line = "🕖 We set off at 7:00pm"
