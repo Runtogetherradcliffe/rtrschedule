@@ -683,16 +683,13 @@ except Exception as _e:
 
 
 
-try:
-    poi_debug
-except NameError:
-    poi_debug = []
-
 with st.expander("Debug: POIs (per-route)", expanded=False):
+    dbg = globals().get("poi_debug", [])
     try:
-        st.json(poi_debug if poi_debug else [{"note":"no debug collected"}])
+        st.json(dbg if dbg else [{"note":"no debug collected"}])
     except Exception:
-        st.write(poi_debug if poi_debug else [{"note":"no debug collected"}])
+        st.write(dbg if dbg else [{"note":"no debug collected"}])
+
 poi_debug = []
 try:
     for r in routes:
