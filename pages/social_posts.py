@@ -200,26 +200,53 @@ def _sample_points(polyline, max_pts=10):
     step = max(1, len(pts)//max_pts)
     return pts[::step]
 
+
 def locationiq_pois(polyline=None, sample_points=None):
+    # Choose base from secrets, default to us1 (matches working POI page)
+    base = _get_secret("LOCATIONIQ_BASE") or "us1"
+    candidates = []
+    for b in (base, "us1", "eu1", "ap1"):
+        if b not in candidates:
+            candidates.append(b)
+
     key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
-    if not key: return []
+    if not key:
+        return []
     pts = sample_points or _sample_points(polyline, max_pts=10)
     names = []
     for (lat, lon) in pts[:10]:
-        try:
-            resp = requests.get("https://eu1.locationiq.com/v1/reverse",
-                                params={"key": key, "lat": lat, "lon": lon, "format": "json"},
-                                timeout=10)
-            if resp.ok:
-                d = resp.json()
-                first = (d.get("display_name","").split(",")[0]).strip()
-                if first and first.lower() not in ("unnamed road",):
-                    names.append(first)
-        except Exception:
+        success = False
+        for b in candidates:
+            try:
+                resp = requests.get(
+                    f"https://{b}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "zoom": 18,
+                    },
+                    timeout=12,
+                )
+                if resp.ok:
+                    d = resp.json()
+                    first = (d.get("display_name","").split(",")[0]).strip()
+                    if first and first.lower() not in ("unnamed road",):
+                        names.append(first)
+                    success = True
+                    break
+            except Exception:
+                continue
+        # if all endpoints failed, move on to next point
+        if not success:
             continue
-    seen=set(); uniq=[]
+
+    # de-dup, keep order
+    seen, uniq = set(), []
     for n in names:
-        k=n.lower()
+        k = n.lower()
         if k not in seen:
             seen.add(k); uniq.append(n)
     return uniq[:3]
