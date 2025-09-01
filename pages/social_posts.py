@@ -199,9 +199,9 @@ r_urls  = [find_col(["route1routelinksourceurl","route1routelink","route1url"]),
 r_srcid = [find_col(["route1sourceid","route1id"]), find_col(["route2sourceid","route2id"])]
 r_terrain = [find_col(["route1terrain","route1terraintype","route1terrainroadtrailmixed"]), find_col(["route2terrain","route2terraintype","route2terrainroadtrailmixed"])]
 r_area = [find_col(["route1area"]), find_col(["route2area"])]
-r_dist = [find_col(["route1distance","route1distancekm","route1distkm"]), find_col(["route2distance","route2distancekm","route2distkm"])]
-r_elev = [find_col(["route1elevation","route1elevationgain","route1elevationgainm"]), find_col(["route2elevation","route2elevationgain","route2elevationgainm"])]
-r_pois = [find_col(["route1pois","route1poissummary","roads(on-route)"]), find_col(["route2pois","route2poissummary","roads(on-route)"])]
+r_dist = [find_col(["route1distance","route1distancekm","route1distkm","route1km","route1distance(km)","route1_dist_km","r1distance","r1distkm"]), find_col(["route2distance","route2distancekm","route2distkm","route2km","route2distance(km)","route2_dist_km","r2distance","r2distkm"])]
+r_elev = [find_col(["route1elevation","route1elevationgain","route1elevationgainm","route1elev","route1elevm","route1elevation(m)","route1_ascent_m","r1elev","r1elevation"]), find_col(["route2elevation","route2elevationgain","route2elevationgainm","route2elev","route2elevm","route2elevation(m)","route2_ascent_m","r2elev","r2elevation"])]
+r_pois = [find_col(["route1pois","route1poissummary","roads(on-route)","route1highlights","route1landmarks","r1pois"]), find_col(["route2pois","route2poissummary","roads(on-route)","route2highlights","route2landmarks","r2pois"])]
 
 if not date_col or not all(r_names) or not all(r_urls):
     st.error("Missing required columns in Schedule (Date, Route Names, Route URLs).")
@@ -307,7 +307,7 @@ is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
 has_social = has_kw(notes, "social", "pub", "after")
 
 # Build friendly copy
-date_str = pd.to_datetime(row["_dateparsed"]).strftime("%a %d %b")
+date_str = pd.to_datetime(str(date_choice), errors="coerce", dayfirst=True).strftime("%a %d %b")
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {meet_loc or 'Radcliffe market'}"
 time_line = "🕖 We set off at 7:00pm"
