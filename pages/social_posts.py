@@ -10,6 +10,9 @@ import pandas as pd
 import requests
 import hashlib
 import streamlit as st
+
+# Debug container to avoid NameError even if later code fails to set it
+poi_debug: list = []
 from typing import List, Dict
 
 # ----------------------------
@@ -662,6 +665,28 @@ routes = [build_route_dict(0), build_route_dict(1)]
 
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
+
+# Collect POI debug info per route (fresh each render)
+poi_debug = []
+try:
+    for r in routes:
+        pois, rep = locationiq_pois(r.get("polyline"), sample_points=None, rid=r.get("rid"), debug=True)
+        if isinstance(rep, dict):
+            rep = dict(rep)
+            rep["rid"] = r.get("rid")
+            rep["final_pois"] = pois
+            poi_debug.append(rep)
+        else:
+            poi_debug.append({"rid": r.get("rid"), "note": "no_rep"})
+except Exception as _e:
+    poi_debug = [{"error": str(_e)}]
+
+
+
+try:
+    poi_debug
+except NameError:
+    poi_debug = []
 
 with st.expander("Debug: POIs (per-route)", expanded=False):
     try:
