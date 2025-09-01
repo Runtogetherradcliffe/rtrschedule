@@ -408,7 +408,7 @@ if "_dateval" not in sched.columns or "_dateparsed" not in sched.columns:
 now_london = pd.Timestamp.now(tz="Europe/London").normalize()
 today_val = now_london.value
 future_rows = sched[sched["_dateval"] >= today_val]
-future_rows = future_rows.sort_values("_dateparsed")
+future_rows = future_rows.sort_values("_dateonly")
 future_rows = future_rows.sort_values("_dateonly")
 opt_idx = future_rows.index.tolist()
 def _fmt(idx):
