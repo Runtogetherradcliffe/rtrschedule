@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.08.16-SOCIAL-3 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-7 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -22,7 +22,7 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.08.16-SOCIAL-3 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-7 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
@@ -210,7 +210,7 @@ if not date_col or not all(r_names) or not all(r_urls):
 # Future-only dropdown with default to next upcoming
 sched["_dateparsed"] = pd.to_datetime(sched[date_col], errors="coerce")
 today = pd.Timestamp.utcnow().normalize()
-future_rows = sched[sched["_dateparsed"] >= today]
+future_rows = sched[sched["_dateval"] >= today_val]
 date_options = future_rows[date_col].astype(str).tolist()
 date_choice = st.selectbox("Date", options=date_options, index=0 if date_options else None)
 if not date_choice:
