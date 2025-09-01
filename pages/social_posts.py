@@ -201,22 +201,68 @@ def _sample_points(polyline, max_pts=10):
     return pts[::step]
 
 
+
 def locationiq_pois(polyline=None, sample_points=None):
-    # Choose base from secrets, default to us1 (matches working POI page)
+    """
+    Return up to 3 highlights drawn ONLY from features *on the route*:
+    - Named roads/trails/paths you traverse
+    - Obvious POIs (parks, canals, rivers, bridges, viaducts, nature reserves)
+    We reverse-geocode several points along the polyline/GPX points, and pick
+    names from the response's address / name fields.
+    """
+    import time
+
     base = _get_secret("LOCATIONIQ_BASE") or "us1"
-    candidates = []
+    bases = []
     for b in (base, "us1", "eu1", "ap1"):
-        if b not in candidates:
-            candidates.append(b)
+        if b not in bases:
+            bases.append(b)
 
     key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
     if not key:
         return []
-    pts = sample_points or _sample_points(polyline, max_pts=10)
-    names = []
-    for (lat, lon) in pts[:10]:
-        success = False
-        for b in candidates:
+
+    pts = sample_points or _sample_points(polyline, max_pts=18)  # slightly denser
+    if not pts:
+        return []
+
+    WANT_KEYS = [
+        "road","footway","pedestrian","path","cycleway","bridleway",
+        "trail","steps","bridge"
+    ]
+    # POI-ish feature classes and types we'll accept by name
+    PRIORITY_WORDS = ["trail","canal","river","park","bridge","viaduct","nature","reserve","reservoir","country park"]
+    ROAD_WORDS = ["road","lane","street","way","drive","avenue","rd","ln","st"]
+
+    def pick_name(payload: dict) -> list[str]:
+        out = []
+        addr = payload.get("address") or {}
+        namedetails = payload.get("namedetails") or {}
+        disp = payload.get("display_name") or ""
+
+        # 1) Named road/path along the coordinate
+        for k in WANT_KEYS:
+            val = addr.get(k)
+            if val and val.strip() and val.lower() != "unnamed road":
+                out.append(val.strip())
+
+        # 2) Named feature (namedetails.name)
+        nm = namedetails.get("name")
+        if nm and nm.strip():
+            out.append(nm.strip())
+
+        # 3) First part of display_name as a fallback
+        if disp:
+            first = disp.split(",")[0].strip()
+            if first and first.lower() != "unnamed road":
+                out.append(first)
+
+        return out
+
+    names: list[str] = []
+    # Reverse geocode with light throttling to avoid free-tier rate limits
+    for (lat, lon) in pts:
+        for b in bases:
             try:
                 resp = requests.get(
                     f"https://{b}.locationiq.com/v1/reverse",
@@ -226,30 +272,67 @@ def locationiq_pois(polyline=None, sample_points=None):
                         "lon": f"{lon:.6f}",
                         "format": "json",
                         "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "namedetails": 1,
                         "zoom": 18,
                     },
                     timeout=12,
                 )
                 if resp.ok:
-                    d = resp.json()
-                    first = (d.get("display_name","").split(",")[0]).strip()
-                    if first and first.lower() not in ("unnamed road",):
-                        names.append(first)
-                    success = True
+                    payload = resp.json()
+                    cand = pick_name(payload)
+                    # extend; we'll filter later
+                    names.extend(cand)
                     break
             except Exception:
                 continue
-        # if all endpoints failed, move on to next point
-        if not success:
-            continue
+        # throttle ~2 req/s across bases
+        time.sleep(0.45)
 
-    # de-dup, keep order
-    seen, uniq = set(), []
+        # stop early if we've already gathered plenty
+        if len(names) > 30:
+            break
+
+    # Filter: only keep items that look like on-route roads/POIs
+    clean = []
     for n in names:
+        s = n.strip()
+        if not s: 
+            continue
+        low = s.lower()
+        if low in ("unnamed road",):
+            continue
+        # Cheap heuristics: accept if it contains priority words or common road words,
+        # and reject building numbers or single tokens that look like postcodes.
+        ok = any(w in low for w in PRIORITY_WORDS) or any(w in low for w in ROAD_WORDS)
+        if not ok:
+            # also accept multi-word proper names (e.g., "Outwood Trail")
+            ok = (len(s.split()) >= 2 and s[0].isupper())
+        if ok:
+            clean.append(s)
+
+    # Ordered de-dup, but collapse consecutive duplicates
+    dedup = []
+    seen = set()
+    prev = None
+    for n in clean:
         k = n.lower()
+        if k == prev:
+            continue
+        prev = k
         if k not in seen:
-            seen.add(k); uniq.append(n)
-    return uniq[:3]
+            seen.add(k)
+            dedup.append(n)
+
+    # Prefer POI-flavoured names first, then roads
+    def score(n: str) -> int:
+        l = n.lower()
+        if any(w in l for w in ["canal","river","trail","park","bridge","viaduct","nature","reserve"]):
+            return 0
+        return 1
+
+    dedup.sort(key=score)
+    return dedup[:3]
 
 def enrich_route_dict(r: dict) -> dict:
     """Return a new dict with dist/elev/pois populated from Strava + LocationIQ.
