@@ -273,24 +273,67 @@ def enrich_route_dict(r: dict) -> dict:
 st.title("Weekly Social Post Composer")
 st.caption("Build: v2025.09.01-SOCIAL-24 — date-only parsing, Strava/LocationIQ enrichment")
 
-sheet_url = st.text_input("Google Sheet URL", value=get_cfg("SHEET_URL",""))
+sheet_url = st.text_input("Google Sheet URL", value=get_cfg("SHEET_CSV_URL", get_cfg("SHEET_URL","")))
 if not sheet_url:
     st.info("Paste your Google Sheet (the master schedule).")
     st.stop()
 
-def to_csv_url(url: str) -> str:
-    if "/export" in url: return url
-    if "/edit" in url:
-        base = url.split("/edit")[0]
-        return f"{base}/export?format=csv&gid=0"
-    return url
 
-csv_url = to_csv_url(sheet_url)
-try:
-    sched = pd.read_csv(csv_url)
-except Exception as e:
+import urllib.parse
+
+def csv_url_candidates(url: str, sheet_name: str = "Schedule"):
+    """Return a list of candidate CSV endpoints for a Google Sheet link."""
+    cands = []
+    if not url:
+        return cands
+
+    # Keep original first if it's already csv/gviz
+    if "format=csv" in url or "/gviz/tq" in url:
+        cands.append(url)
+
+    # Parse parts
+    u = urllib.parse.urlparse(url)
+    # spreadsheet id
+    sid = None
+    m = re.search(r"/spreadsheets/d/([^/]+)", u.path)
+    if m:
+        sid = m.group(1)
+
+    # Try to find gid in query or fragment
+    q = urllib.parse.parse_qs(u.query)
+    gid = (q.get("gid", [None])[0]) or (u.fragment.split("gid=")[-1] if "gid=" in u.fragment else None)
+
+    if sid and gid:
+        cands.append(f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid}")
+
+    if sid:
+        # gviz by sheet name
+        cands.append(
+            f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq"
+            f"?tqx=out:csv&sheet={urllib.parse.quote(sheet_name)}"
+        )
+
+    # Deduplicate while preserving order
+    seen = set(); uniq = []
+    for cu in cands:
+        if cu not in seen:
+            seen.add(cu); uniq.append(cu)
+    return uniq
+
+# Build candidates and try each
+csv_candidates = csv_url_candidates(sheet_url, sheet_name=get_cfg("SHEET_NAME","Schedule"))
+sched = None
+err = None
+for cu in csv_candidates:
+    try:
+        sched = pd.read_csv(cu)
+        break
+    except Exception as e:
+        err = e
+if sched is None:
     st.error("Couldn't read the Google Sheet as CSV. Is it shared correctly?")
     st.stop()
+
 
 # Column mapping (as per your master sheet)
 date_col = "Date (Thu)"
