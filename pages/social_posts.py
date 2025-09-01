@@ -279,15 +279,16 @@ is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
 has_social = has_kw(notes, "social", "pub", "market", "after")
 
 # Build friendly copy
-date_str = str(date_choice)
+date_str = pd.to_datetime(row["_dateparsed"]).strftime("%a %d %b")
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {meet_loc or 'Radcliffe market'}"
-time_line = f"🕖 We set off at {get_cfg('MEET_TIME_DEFAULT', '19:00')}"
+time_line = "🕖 We set off at 7:00pm"
 
 def route_blurb(label, r):
-    dist = f"{r['dist']} km" if r['dist'] is not None else "? km"
-    elev = f"{r['elev']:.0f}m" if r['elev'] is not None else "?m"
-    desc = hilliness_blurb(r['dist'], r['elev'])
+    dist = f"{r['dist']:.1f} km" if isinstance(r['dist'], (int, float)) else (f"{r['dist']} km" if r['dist'] is not None else "? km")
+    elev_val = r['elev']
+    elev_txt = f"{elev_val:.0f}m" if isinstance(elev_val, (int, float)) else None
+    desc = hilliness_blurb(r['dist'], elev_val)
     # Highlights: take up to 3 from roads/landmarks snippet
     highlights = ""
     if r["pois"]:
@@ -301,7 +302,7 @@ def route_blurb(label, r):
     url = r["url"] or (f"https://www.strava.com/routes/{r['rid']}" if r["rid"] else "")
     name = r["name"] or "Route"
     line1 = f"• {label} – {name}: {url}".strip()
-    line2 = f"  {dist} with {elev} of elevation – {desc}"
+    line2 = f"  {dist}" + (f" with {elev_txt} of elevation" if elev_txt else "") + f" – {desc}"
     line3 = f"  {highlights}" if highlights else ""
     return "\\n".join([line1, line2] + ([line3] if line3 else []))
 
