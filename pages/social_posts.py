@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-14 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-17 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -157,6 +157,10 @@ def ordinal(n: int) -> str:
         suff = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suff}"
 
+
+def format_day_month_uk(dts):
+    ts = pd.Timestamp(dts)
+    return f"{ordinal(ts.day)} {ts.strftime('%B')}"
 def format_full_uk_date(d: pd.Timestamp) -> str:
     # Expect naive datetime64[ns]; convert to Timestamp if needed
     ts = pd.Timestamp(d)
@@ -173,7 +177,7 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-14 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-17 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
@@ -502,7 +506,7 @@ is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
 has_social = has_kw(notes, "social", "pub", "after")
 
 # Build friendly copy
-date_str = format_full_uk_date(row["_dateparsed"])
+date_str = format_day_month_uk(row["_dateparsed"])
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {(meet_loc or get_cfg('MEET_LOC_DEFAULT', 'Radcliffe Market')).title()}"
 time_line = "🕖 We set off at 7:00pm"
@@ -551,7 +555,7 @@ lines.append("👟 Grab your shoes, bring your smiles – see you Thursday!")
 lines.append("")
 lines.append("*RunTogether Radcliffe – This Thursday!*")
 
-post_text = "\\n".join(lines)
+post_text = "\n".join(lines)
 
 st.subheader("Composed message")
 st.text_area("Copy/paste to socials", value=post_text, height=420, key="long_post_area")
