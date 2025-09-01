@@ -8,7 +8,9 @@ import urllib.parse
 from datetime import datetime
 import pandas as pd
 import requests
+import hashlib
 import streamlit as st
+from typing import List, Dict
 
 # ----------------------------
 # Config / helpers
@@ -202,25 +204,181 @@ def _sample_points(polyline, max_pts=10):
 
 
 
-def locationiq_pois(polyline=None, sample_points=None):
+
+def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None, debug: bool = False):
     """
-    Return up to 3 highlights drawn ONLY from features *on the route*:
-    - Named roads/trails/paths you traverse
-    - Obvious POIs (parks, canals, rivers, bridges, viaducts, nature reserves)
-    We reverse-geocode several points along the polyline/GPX points, and pick
-    names from the response's address / name fields.
+    Return up to 3 highlights drawn from features along the route.
+    - Caches reverse geocoding results (6h) and final POIs per route/polyline hash.
+    - If debug=True, returns (pois, report) where report describes the pipeline.
     """
     import time
 
-    base = _get_secret("LOCATIONIQ_BASE") or "us1"
-    bases = []
-    for b in (base, "us1", "eu1", "ap1"):
-        if b not in bases:
-            bases.append(b)
+    base_pref = _get_secret("LOCATIONIQ_BASE") or "us1"
+    base_order = []
+    for b in (base_pref, "us1", "eu1", "ap1"):
+        if b not in base_order:
+            base_order.append(b)
 
     key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
     if not key:
-        return []
+        return ([], {"error": "no_api_key"}) if debug else []
+
+    pts = sample_points or _sample_points(polyline, max_pts=30)
+    if not pts:
+        return ([], {"error": "no_points"}) if debug else []
+
+    ONROUTE_KEYS = [
+        "road","footway","pedestrian","path","cycleway","bridleway","trail","steps",
+        "bridge","river","waterway","park","leisure","natural"
+    ]
+    PRIORITY_WORDS = ["trail","canal","river","park","bridge","viaduct","towpath","nature","reserve"]
+    ROAD_WORDS = ["road","lane","street","way","drive","avenue","rd","ln","st"]
+
+    # Cache keys (per final POI result)
+    phash = hashlib.md5((polyline or str(pts)).encode("utf-8")).hexdigest()
+    cache_key = f"pois:{rid or ''}:{phash}:{base_order[0]}"
+    if "poi_cache" not in st.session_state:
+        st.session_state["poi_cache"] = {}
+    if not debug:
+        cached = st.session_state["poi_cache"].get(cache_key)
+        if cached:
+            return cached
+
+    # Reverse geocode with caching of each call
+    if hasattr(st, "cache_data"):
+        @st.cache_data(show_spinner=False, ttl=21600)
+        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "namedetails": 1,
+                        "zoom": zoom,
+                    },
+                    timeout=12,
+                )
+                if not r.ok:
+                    return None
+                return r.json()
+            except Exception:
+                return None
+    else:
+        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "namedetails": 1,
+                        "zoom": zoom,
+                    },
+                    timeout=12,
+                )
+                if not r.ok:
+                    return None
+                return r.json()
+            except Exception:
+                return None
+
+    def extract_names(payload: dict) -> list[str]:
+        out = []
+        addr = payload.get("address") or {}
+        namedetails = payload.get("namedetails") or {}
+        disp = payload.get("display_name") or ""
+        for k in ONROUTE_KEYS:
+            v = addr.get(k)
+            if v and v.strip() and v.lower() != "unnamed road":
+                out.append(v.strip())
+        nm = namedetails.get("name")
+        if nm and nm.strip():
+            out.append(nm.strip())
+        if disp:
+            first = disp.split(",")[0].strip()
+            if first and first.lower() != "unnamed road":
+                out.append(first)
+        return out
+
+    names = []
+    hits = 0
+    calls = 0
+    per_point: list[dict] = []
+    for (lat, lon) in pts:
+        point_report = {"lat": lat, "lon": lon, "tried": [], "got": None}
+        got = False
+        for b in base_order:
+            for z in (18, 16):
+                calls += 1
+                payload = _liq_reverse_cached(b, key, lat, lon, z)
+                point_report["tried"].append({"base": b, "zoom": z, "ok": payload is not None})
+                if payload:
+                    cands = extract_names(payload)
+                    if cands:
+                        names.extend(cands)
+                    point_report["got"] = (cands[:3] if cands else [])
+                    hits += 1
+                    got = True
+                    break
+            if got:
+                break
+        per_point.append(point_report)
+        if hits >= 12:  # enough per route
+            break
+
+    # Filtering & ranking
+    clean = []
+    for n in names:
+        s = n.strip()
+        if not s or s.lower() == "unnamed road":
+            continue
+        l = s.lower()
+        ok = any(w in l for w in PRIORITY_WORDS) or any(w in l for w in ROAD_WORDS) or (len(s.split()) >= 2 and s[0].isupper())
+        if ok:
+            clean.append(s)
+
+    seen=set(); dedup=[]
+    for s in clean:
+        k=s.lower()
+        if k in seen: 
+            continue
+        seen.add(k); dedup.append(s)
+
+    def score(s: str) -> int:
+        l = s.lower()
+        if any(w in l for w in ["trail","canal","river","park","bridge","viaduct","towpath","nature","reserve"]):
+            return 0
+        return 1
+
+    dedup.sort(key=score)
+    pois = dedup[:3]
+
+    # store cache
+    st.session_state["poi_cache"][cache_key] = pois
+
+    if debug:
+        report = {
+            "rid": rid,
+            "polyline_hash": phash,
+            "points_considered": len(pts),
+            "reverse_calls": calls,
+            "points_hit": hits,
+            "raw_names": names[:30],
+            "filtered": dedup[:10],
+            "final_pois": pois,
+            "bases": base_order,
+        }
+        return pois, report
+    return pois
 
     pts = sample_points or _sample_points(polyline, max_pts=18)  # slightly denser
     if not pts:
@@ -367,12 +525,13 @@ def enrich_route_dict(r: dict) -> dict:
 
     pois = r.get("pois")
     if not pois:
-        pois_list = locationiq_pois(polyline, sample_points=sample)
+        pois_list, _poi_rep = locationiq_pois(polyline, sample_points=sample, rid=rid, debug=True)
         if pois_list:
             pois = ", ".join(pois_list)
 
     out = dict(r)
     out["dist"] = dist_km
+    out["polyline"] = polyline
     if elev_m is not None: out["elev"] = elev_m
     if pois: out["pois"] = pois
     return out
@@ -503,6 +662,21 @@ routes = [build_route_dict(0), build_route_dict(1)]
 
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
+
+with st.expander("Debug: POIs (per-route)", expanded=False):
+    try:
+        st.json(poi_debug if poi_debug else [{"note":"no debug collected"}])
+    except Exception:
+        st.write(poi_debug if poi_debug else [{"note":"no debug collected"}])
+poi_debug = []
+try:
+    for r in routes:
+        if r.get('rid'):
+            _, rep = locationiq_pois(None, sample_points=_sample_points(r.get('polyline')) if r.get('polyline') else None, rid=r.get('rid'), debug=True)
+            poi_debug.append(rep if isinstance(rep, dict) else {'rid': r.get('rid'), 'note':'no_rep'})
+except Exception:
+    pass
+
 
 # ----------------------------
 # Compose message
