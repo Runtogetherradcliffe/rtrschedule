@@ -208,8 +208,10 @@ if not date_col or not all(r_names) or not all(r_urls):
     st.stop()
 
 # Future-only dropdown with default to next upcoming
-sched["_dateparsed"] = pd.to_datetime(sched[date_col], errors="coerce")
-today = pd.Timestamp.utcnow().normalize()
+# Robust date parsing & timezone-safe comparison (use Europe/London)
+_dt = pd.to_datetime(sched[date_col], errors="coerce", utc=True)
+sched["_dateparsed"] = _dt.tz_convert("Europe/London").normalize()
+today = pd.Timestamp.now(tz="Europe/London").normalize()
 future_rows = sched[sched["_dateparsed"] >= today]
 date_options = future_rows[date_col].astype(str).tolist()
 date_choice = st.selectbox("Date", options=date_options, index=0 if date_options else None)
