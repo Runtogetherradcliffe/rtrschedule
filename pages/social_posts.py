@@ -210,28 +210,41 @@ def _sample_points(polyline, max_pts=10):
 
 
 
+
 def get_locationiq_key(*, debug: bool = False):
     """
     Try a bunch of places/aliases for the LocationIQ API key so we match other pages:
     - st.secrets top-level: LOCATIONIQ_API_KEY / LOCATIONIQ_TOKEN / LOCATIONIQ_KEY / locationiq_api_key
-    - st.secrets nested: [locationiq].api_key / token / key
+    - st.secrets nested: [locationiq].api_key / token / key (no type assumption; treat like mapping)
     - st.session_state: same aliases
     - os.environ: LOCATIONIQ_API_KEY / LOCATIONIQ_TOKEN
-    Returns key (and optionally a debug list of where it was found).
+    Returns key (and optionally a debug dict showing where it was found).
     """
     candidates = []
     # secrets (top-level)
     try:
         s = st.secrets
         for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN","LOCATIONIQ_KEY","locationiq_api_key","locationiq_token","locationiq_key"]:
-            v = s.get(k, None)
+            try:
+                v = s.get(k, None)
+            except Exception:
+                try:
+                    v = s[k]
+                except Exception:
+                    v = None
             candidates.append(("secrets", k, v))
-        # secrets (nested sections)
+        # secrets (nested sections) without assuming dict type
         for sect in ["locationiq","LOCATIONIQ"]:
-            sec = s.get(sect, None)
-            if isinstance(sec, dict):
+            try:
+                sec = s[sect]
+            except Exception:
+                sec = None
+            if sec is not None:
                 for k in ["api_key","token","key"]:
-                    v = sec.get(k, None)
+                    try:
+                        v = sec.get(k, None) if hasattr(sec, "get") else sec[k]
+                    except Exception:
+                        v = None
                     candidates.append((f"secrets[{sect}]", k, v))
     except Exception:
         pass
@@ -240,12 +253,20 @@ def get_locationiq_key(*, debug: bool = False):
         for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN","LOCATIONIQ_KEY","locationiq_api_key","locationiq_token","locationiq_key"]:
             v = st.session_state.get(k, None)
             candidates.append(("session_state", k, v))
+        if "locationiq" in st.session_state and isinstance(st.session_state["locationiq"], dict):
+            for k in ["api_key","token","key"]:
+                v = st.session_state["locationiq"].get(k, None)
+                candidates.append(("session_state[locationiq]", k, v))
     except Exception:
         pass
     # environment
-    for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN"]:
-        v = os.environ.get(k, None)
-        candidates.append(("env", k, v))
+    try:
+        import os as _os
+        for k in ["LOCATIONIQ_API_KEY","LOCATIONIQ_TOKEN","LOCATIONIQ_KEY"]:
+            v = _os.environ.get(k, None)
+            candidates.append(("env", k, v))
+    except Exception:
+        pass
 
     # choose first truthy
     for origin, name, val in candidates:
