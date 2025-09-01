@@ -314,14 +314,14 @@ for c in sched.columns:
         break
 notes_col = "Notes"
 
-r_names = ["Route 1 - Name", "Route 2 - Name"]), find_col(["route2name"])]
-r_urls = ["Route 1 - Route Link (Source URL)", "Route 2 - Route Link (Source URL)"]), find_col(["route2routelinksourceurl","route2routelink","route2url"])]
-r_srcid = ["Route 1 - Source ID", "Route 2 - Source ID"]), find_col(["route2sourceid","route2id"])]
-r_terrain = ["Route 1 - Terrain (Road/Trail/Mixed)", "Route 2 - Terrain (Road/Trail/Mixed)"]), find_col(["route2terrain","route2terraintype","route2terrainroadtrailmixed"])]
-r_area = ["Route 1 - Area", "Route 2 - Area"]), find_col(["route2area"])]
-r_dist = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]), find_col(["route2distance","route2distancekm","route2distkm","route2km","route2distance(km)","route2_dist_km","r2distance","r2distkm"])]
-r_elev = [None, None]), find_col(["route2elevation","route2elevationgain","route2elevationgainm","route2elev","route2elevm","route2elevation(m)","route2_ascent_m","r2elev","r2elevation"])]
-r_pois = [None, None]), find_col(["route2pois","route2poissummary","roads(on-route)","route2highlights","route2landmarks","r2pois"])]
+r_names = ["Route 1 - Name", "Route 2 - Name"]
+r_urls = ["Route 1 - Route Link (Source URL)", "Route 2 - Route Link (Source URL)"]
+r_srcid = ["Route 1 - Source ID", "Route 2 - Source ID"]
+r_terrain = ["Route 1 - Terrain (Road/Trail/Mixed)", "Route 2 - Terrain (Road/Trail/Mixed)"]
+r_area = ["Route 1 - Area", "Route 2 - Area"]
+r_dist = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]
+r_elev = [None, None]
+r_pois = [None, None]
 
 if not date_col or not all(r_names) or not all(r_urls):
     st.error("Missing required columns in Schedule (Date, Route Names, Route URLs).")
@@ -471,8 +471,7 @@ def route_blurb(label, r):
     lines = [line1, line2]
     if highlights:
         lines.append("  " + highlights)
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 lines = []
 lines.append(f"{header} — {date_str}")
