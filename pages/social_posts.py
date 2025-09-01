@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-7 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-12 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -10,6 +10,130 @@ import urllib.parse
 import pandas as pd
 import requests
 import streamlit as st
+
+# === Strava & LocationIQ enrichment helpers ===
+import json, math
+
+def _get_secret(name, default=None):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
+
+def get_strava_token():
+    tok = st.session_state.get("strava_access_token")
+    if tok:
+        return tok
+    # Optional: refresh token workflow via secrets (if configured)
+    cid = _get_secret("STRAVA_CLIENT_ID")
+    csec = _get_secret("STRAVA_CLIENT_SECRET")
+    rtok = st.session_state.get("strava_refresh_token") or _get_secret("STRAVA_REFRESH_TOKEN")
+    if cid and csec and rtok:
+        try:
+            resp = requests.post("https://www.strava.com/oauth/token", data={
+                "client_id": cid, "client_secret": csec,
+                "grant_type": "refresh_token", "refresh_token": rtok
+            }, timeout=15)
+            if resp.ok:
+                data = resp.json()
+                st.session_state["strava_access_token"] = data.get("access_token")
+                st.session_state["strava_refresh_token"] = data.get("refresh_token", rtok)
+                return data.get("access_token")
+        except Exception:
+            pass
+    return None
+
+def _extract_route_id(url):
+    # Accepts full strava route URL or digits
+    if not url:
+        return None
+    s = str(url)
+    m = re.search(r"/routes/(\d+)", s)
+    if m: return m.group(1)
+    # fallback: digits only
+    m = re.search(r"(\d{6,})", s)
+    return m.group(1) if m else None
+
+def fetch_strava_route_metrics(url_or_id):
+    rid = _extract_route_id(url_or_id)
+    if not rid:
+        return None
+    tok = get_strava_token()
+    if not tok:
+        return None
+    try:
+        r = requests.get(f"https://www.strava.com/api/v3/routes/{rid}",
+                         headers={"Authorization": f"Bearer {tok}"}, timeout=15)
+        if not r.ok:
+            return None
+        j = r.json()
+        dist_km = float(j.get("distance", 0.0))/1000.0 if j.get("distance") is not None else None
+        elev_m = j.get("elevation_gain")
+        try:
+            elev_m = float(elev_m) if elev_m is not None else None
+        except Exception:
+            elev_m = None
+        poly = None
+        if j.get("map") and (j["map"].get("polyline") or j["map"].get("summary_polyline")):
+            poly = j["map"].get("polyline") or j["map"].get("summary_polyline")
+        return {"dist_km": dist_km, "elev_m": elev_m, "polyline": poly}
+    except Exception:
+        return None
+
+# Simple polyline decoder (Google polyline algorithm)
+def _decode_polyline(polyline_str):
+    if not polyline_str: return []
+    coords = []
+    index = lat = lng = 0
+    while index < len(polyline_str):
+        for coord in (lat, lng):
+            result = 1; shift = 0; b = 0x20
+            while b >= 0x20:
+                b = ord(polyline_str[index]) - 63
+                index += 1
+                result += (b & 0x1f) << shift
+                shift += 5
+            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            if coord is lat:
+                lat += d
+            else:
+                lng += d
+        coords.append((lat / 1e5, lng / 1e5))
+    return coords
+
+def sample_points(poly, every= max(1, 30)):
+    pts = _decode_polyline(poly)
+    if not pts: return []
+    if len(pts) <= every: return pts
+    return [pts[i] for i in range(0, len(pts), every)]
+
+def fetch_locationiq_highlights(polyline):
+    key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
+    if not key or not polyline:
+        return []
+    pts = sample_points(polyline, every=40)
+    names = []
+    for (lat, lon) in pts[:10]:  # cap calls
+        try:
+            resp = requests.get("https://eu1.locationiq.com/v1/reverse",
+                                params={"key": key, "lat": lat, "lon": lon, "format": "json"},
+                                timeout=10)
+            if resp.ok:
+                d = resp.json()
+                disp = d.get("display_name","")
+                # Take first meaningful component
+                part = disp.split(",")[0].strip()
+                if part and part.lower() not in ("unnamed road",):
+                    names.append(part)
+        except Exception:
+            continue
+    # Deduplicate while preserving order
+    seen = set(); uniq = []
+    for n in names:
+        k = n.lower()
+        if k not in seen:
+            seen.add(k); uniq.append(n)
+    return uniq[:3]
 from math import radians, sin, cos, asin, sqrt
 from datetime import datetime, timezone
 
@@ -22,7 +146,7 @@ except Exception:
 
 st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
 st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-7 — polished template, emoji rules, future-date picker, clipboard.")
+st.caption("Build: v2025.09.01-SOCIAL-12 — polished template, emoji rules, future-date picker, clipboard.")
 
 
 # ----------------------------- Helpers ----------------------------------
@@ -181,27 +305,23 @@ def find_col(targets):
                 return c
     return None
 
-date_col = find_col(["date","datethu"])
+date_col = "Date (Thu)"
 
 meet_loc_col = None
 for c in sched.columns:
     if "meet" in c.lower() and "loc" in c.lower():
         meet_loc_col = c
         break
-notes_col = None
-for c in sched.columns:
-    if "notes" in c.lower():
-        notes_col = c
-        break
+notes_col = "Notes"
 
-r_names = [find_col(["route1name"]), find_col(["route2name"])]
-r_urls  = [find_col(["route1routelinksourceurl","route1routelink","route1url"]), find_col(["route2routelinksourceurl","route2routelink","route2url"])]
-r_srcid = [find_col(["route1sourceid","route1id"]), find_col(["route2sourceid","route2id"])]
-r_terrain = [find_col(["route1terrain","route1terraintype","route1terrainroadtrailmixed"]), find_col(["route2terrain","route2terraintype","route2terrainroadtrailmixed"])]
-r_area = [find_col(["route1area"]), find_col(["route2area"])]
-r_dist = [find_col(["route1distance","route1distancekm","route1distkm","route1km","route1distance(km)","route1_dist_km","r1distance","r1distkm"]), find_col(["route2distance","route2distancekm","route2distkm","route2km","route2distance(km)","route2_dist_km","r2distance","r2distkm"])]
-r_elev = [find_col(["route1elevation","route1elevationgain","route1elevationgainm","route1elev","route1elevm","route1elevation(m)","route1_ascent_m","r1elev","r1elevation"]), find_col(["route2elevation","route2elevationgain","route2elevationgainm","route2elev","route2elevm","route2elevation(m)","route2_ascent_m","r2elev","r2elevation"])]
-r_pois = [find_col(["route1pois","route1poissummary","roads(on-route)","route1highlights","route1landmarks","r1pois"]), find_col(["route2pois","route2poissummary","roads(on-route)","route2highlights","route2landmarks","r2pois"])]
+r_names = ["Route 1 - Name", "Route 2 - Name"]), find_col(["route2name"])]
+r_urls = ["Route 1 - Route Link (Source URL)", "Route 2 - Route Link (Source URL)"]), find_col(["route2routelinksourceurl","route2routelink","route2url"])]
+r_srcid = ["Route 1 - Source ID", "Route 2 - Source ID"]), find_col(["route2sourceid","route2id"])]
+r_terrain = ["Route 1 - Terrain (Road/Trail/Mixed)", "Route 2 - Terrain (Road/Trail/Mixed)"]), find_col(["route2terrain","route2terraintype","route2terrainroadtrailmixed"])]
+r_area = ["Route 1 - Area", "Route 2 - Area"]), find_col(["route2area"])]
+r_dist = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]), find_col(["route2distance","route2distancekm","route2distkm","route2km","route2distance(km)","route2_dist_km","r2distance","r2distkm"])]
+r_elev = [None, None]), find_col(["route2elevation","route2elevationgain","route2elevationgainm","route2elev","route2elevm","route2elevation(m)","route2_ascent_m","r2elev","r2elevation"])]
+r_pois = [None, None]), find_col(["route2pois","route2poissummary","roads(on-route)","route2highlights","route2landmarks","r2pois"])]
 
 if not date_col or not all(r_names) or not all(r_urls):
     st.error("Missing required columns in Schedule (Date, Route Names, Route URLs).")
@@ -286,6 +406,19 @@ def build_route_dict(side_idx: int):
             "dist": dist, "elev": elev, "pois": pois}
 
 routes = [build_route_dict(0), build_route_dict(1)]
+# Try to enrich metrics & highlights from Strava + LocationIQ
+for r in routes:
+    if (r.get("dist") is None or r.get("elev") is None or not r.get("pois")) and (r.get("url") or r.get("rid")):
+        met = fetch_strava_route_metrics(r.get("url") or r.get("rid"))
+        if met:
+            if r.get("dist") is None and met.get("dist_km"):
+                r["dist"] = met["dist_km"]
+            if r.get("elev") is None and met.get("elev_m") is not None:
+                r["elev"] = met["elev_m"]
+            if not r.get("pois"):
+                hi = fetch_locationiq_highlights(met.get("polyline"))
+                if hi:
+                    r["pois"] = ", ".join(hi)
 
 # Label longer = 8k, shorter = 5k (if distances available)
 def sort_with_labels(r1, r2):
@@ -295,7 +428,15 @@ def sort_with_labels(r1, r2):
 labeled = sort_with_labels(routes[0], routes[1])
 
 # Event detection
-meet_loc = clean(row.get(meet_loc_col, "")) if meet_loc_col else get_cfg("MEET_LOC_DEFAULT", "Radcliffe Market")
+meet_loc = clean(row.get(meet_loc_col, "")) if meet_loc_col else ""
+# MEETING_PARSE_INJECTED
+if not meet_loc:
+    _notes = str(row.get("Notes", ""))
+    m = re.search(r"Meeting:\s*([^|\n]+)", _notes, re.IGNORECASE)
+    if m:
+        meet_loc = m.group(1).strip()
+if not meet_loc:
+    meet_loc = get_cfg("MEET_LOC_DEFAULT", "Radcliffe Market")
 notes = clean(row.get(notes_col, "")) if notes_col else ""
 
 def has_kw(s, *kws):
@@ -313,26 +454,25 @@ meeting_line = f"📍 Meeting at: {meet_loc or 'Radcliffe market'}"
 time_line = "🕖 We set off at 7:00pm"
 
 def route_blurb(label, r):
-    dist = f"{r['dist']:.1f} km" if isinstance(r['dist'], (int, float)) else (f"{r['dist']} km" if r['dist'] is not None else "? km")
-    elev_val = r['elev']
-    elev_txt = f"{elev_val:.0f}m" if isinstance(elev_val, (int, float)) else None
-    desc = hilliness_blurb(r['dist'], elev_val)
-    # Highlights: take up to 3 from roads/landmarks snippet
-    highlights = ""
-    if r["pois"]:
-        chunks = [c.strip() for c in r["pois"].split("|") if c.strip()]
-        candidates = []
-        for ch in chunks:
-            parts = [p.strip() for p in re.split(r"[;,]", ch) if p.strip()]
-            candidates.extend(parts)
-        if candidates:
-            highlights = "🏞️ Highlights: " + ", ".join(candidates[:3])
+    dist_txt = f"{r['dist']:.1f} km" if isinstance(r["dist"], (int, float)) else (f"{r['dist']} km" if r["dist"] is not None else "? km")
+    desc = hilliness_blurb(r["dist"], r["elev"])
     url = r["url"] or (f"https://www.strava.com/routes/{r['rid']}" if r["rid"] else "")
     name = r["name"] or "Route"
-    line1 = f"• {label} – {name}: {url}".strip()
-    line2 = f"  {dist}" + (f" with {elev_txt} of elevation" if elev_txt else "") + f" – {desc}"
-    line3 = f"  {highlights}" if highlights else ""
-    return "\\n".join([line1, line2] + ([line3] if line3 else []))
+    line1 = f"• {label} – {name}" + (f": {url}" if url else "")
+    line2 = f"  {dist_txt} – {desc}"
+    highlights = ""
+    if r.get("pois"):
+        chunks = [c.strip() for c in str(r["pois"]).split("|") if c.strip()]
+        parts = []
+        for ch in chunks:
+            parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
+        if parts:
+            highlights = "🏞️ Highlights: " + ", ".join(parts[:3])
+    lines = [line1, line2]
+    if highlights:
+        lines.append("  " + highlights)
+    return "
+".join(lines)
 
 lines = []
 lines.append(f"{header} — {date_str}")
