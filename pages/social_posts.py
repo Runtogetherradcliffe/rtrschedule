@@ -21,10 +21,12 @@ def _get_secret(name, default=None):
         return default
 
 def get_strava_token():
-    tok = st.session_state.get("strava_access_token")
-    if tok:
-        return tok
-    # Optional: refresh token workflow via secrets (if configured)
+    # Prefer session token set by OAuth pages
+    for k in ("strava_access_token", "strava_token", "access_token"):
+        tok = st.session_state.get(k)
+        if tok:
+            return tok
+    # Optional: refresh via secrets if refresh token provided
     cid = _get_secret("STRAVA_CLIENT_ID")
     csec = _get_secret("STRAVA_CLIENT_SECRET")
     rtok = st.session_state.get("strava_refresh_token") or _get_secret("STRAVA_REFRESH_TOKEN")
@@ -82,22 +84,31 @@ def fetch_strava_route_metrics(url_or_id):
 
 # Simple polyline decoder (Google polyline algorithm)
 def _decode_polyline(polyline_str):
-    if not polyline_str: return []
+    if not polyline_str:
+        return []
+    index, lat, lng = 0, 0, 0
     coords = []
-    index = lat = lng = 0
     while index < len(polyline_str):
-        for coord in (lat, lng):
-            result = 1; shift = 0; b = 0x20
-            while b >= 0x20:
-                b = ord(polyline_str[index]) - 63
-                index += 1
-                result += (b & 0x1f) << shift
-                shift += 5
-            d = ~(result >> 1) if (result & 1) else (result >> 1)
-            if coord is lat:
-                lat += d
-            else:
-                lng += d
+        result, shift = 0, 0
+        while True:
+            b = ord(polyline_str[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlat = ~(result >> 1) if (result & 1) else (result >> 1)
+        lat += dlat
+        result, shift = 0, 0
+        while True:
+            b = ord(polyline_str[index]) - 63
+            index += 1
+            result |= (b & 0x1f) << shift
+            shift += 5
+            if b < 0x20:
+                break
+        dlng = ~(result >> 1) if (result & 1) else (result >> 1)
+        lng += dlng
         coords.append((lat / 1e5, lng / 1e5))
     return coords
 
@@ -450,7 +461,7 @@ has_social = has_kw(notes, "social", "pub", "after")
 # Build friendly copy
 date_str = pd.to_datetime(str(date_choice), errors="coerce", dayfirst=True).strftime("%a %d %b")
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
-meeting_line = f"📍 Meeting at: {meet_loc or 'Radcliffe market'}"
+meeting_line = f"📍 Meeting at: {(meet_loc or get_cfg('MEET_LOC_DEFAULT', 'Radcliffe Market')).title()}"
 time_line = "🕖 We set off at 7:00pm"
 
 def route_blurb(label, r):
