@@ -208,10 +208,8 @@ if not date_col or not all(r_names) or not all(r_urls):
     st.stop()
 
 # Future-only dropdown with default to next upcoming
-# Robust date parsing & timezone-safe comparison (use Europe/London)
-_dt = pd.to_datetime(sched[date_col], errors="coerce", utc=True)
-sched["_dateparsed"] = _dt.dt.tz_convert("Europe/London").dt.normalize()
-today = pd.Timestamp.now(tz="Europe/London").normalize()
+sched["_dateparsed"] = pd.to_datetime(sched[date_col], errors="coerce")
+today = pd.Timestamp.utcnow().normalize()
 future_rows = sched[sched["_dateparsed"] >= today]
 date_options = future_rows[date_col].astype(str).tolist()
 date_choice = st.selectbox("Date", options=date_options, index=0 if date_options else None)
@@ -221,8 +219,16 @@ if not date_choice:
 row = future_rows[future_rows[date_col].astype(str) == str(date_choice)].iloc[0]
 
 def try_float(s):
+    """Extract first numeric value from strings like '8km', '1,200 m', '75m', or plain numbers."""
+    if s is None:
+        return None
     try:
-        return float(s)
+        if isinstance(s, (int, float)):
+            return float(s)
+        t = str(s)
+        t = t.replace(',', '')
+        m = re.search(r"[-+]?\d*\.?\d+", t)
+        return float(m.group(0)) if m else None
     except Exception:
         return None
 
@@ -276,19 +282,18 @@ def has_kw(s, *kws):
 
 is_on_tour = has_kw(notes, "on tour", "ontour") or (meet_loc and meet_loc.lower() != "radcliffe market")
 is_pride = has_kw(notes, "pride", "rainbow", "lgbt", "🏳️‍🌈")
-has_social = has_kw(notes, "social", "pub", "market", "after")
+has_social = has_kw(notes, "social", "pub", "after")
 
 # Build friendly copy
-date_str = pd.to_datetime(row["_dateparsed"]).strftime("%a %d %b")
+date_str = str(date_choice)
 header = "🌈 Pride Run!" if is_pride else ("🚌 On Tour!" if is_on_tour else "🏃 This Thursday")
 meeting_line = f"📍 Meeting at: {meet_loc or 'Radcliffe market'}"
-time_line = "🕖 We set off at 7:00pm"
+time_line = f"🕖 We set off at {get_cfg('MEET_TIME_DEFAULT', '19:00')}"
 
 def route_blurb(label, r):
-    dist = f"{r['dist']:.1f} km" if isinstance(r['dist'], (int, float)) else (f"{r['dist']} km" if r['dist'] is not None else "? km")
-    elev_val = r['elev']
-    elev_txt = f"{elev_val:.0f}m" if isinstance(elev_val, (int, float)) else None
-    desc = hilliness_blurb(r['dist'], elev_val)
+    dist = f"{r['dist']} km" if r['dist'] is not None else "? km"
+    elev = f"{r['elev']:.0f}m" if r['elev'] is not None else "?m"
+    desc = hilliness_blurb(r['dist'], r['elev'])
     # Highlights: take up to 3 from roads/landmarks snippet
     highlights = ""
     if r["pois"]:
@@ -302,7 +307,7 @@ def route_blurb(label, r):
     url = r["url"] or (f"https://www.strava.com/routes/{r['rid']}" if r["rid"] else "")
     name = r["name"] or "Route"
     line1 = f"• {label} – {name}: {url}".strip()
-    line2 = f"  {dist}" + (f" with {elev_txt} of elevation" if elev_txt else "") + f" – {desc}"
+    line2 = f"  {dist} with {elev} of elevation – {desc}"
     line3 = f"  {highlights}" if highlights else ""
     return "\\n".join([line1, line2] + ([line3] if line3 else []))
 
