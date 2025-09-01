@@ -1,6 +1,6 @@
 
 # pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-19 (polished template + emojis + future-date dropdown + copy button)
+# Build: v2025.09.01-SOCIAL-22.1 (polished template + emojis + future-date dropdown + copy button)
 
 import io
 import re
@@ -124,7 +124,7 @@ def fetch_locationiq_highlights(polyline):
         return []
     pts = sample_points(polyline, every=40)
     names = []
-    for (lat, lon) in pts[:10]:  # cap calls
+    for (lat, lon) in pts[:10]:
         try:
             resp = requests.get("https://eu1.locationiq.com/v1/reverse",
                                 params={"key": key, "lat": lat, "lon": lon, "format": "json"},
@@ -132,333 +132,182 @@ def fetch_locationiq_highlights(polyline):
             if resp.ok:
                 d = resp.json()
                 disp = d.get("display_name","")
-                # Take first meaningful component
                 part = disp.split(",")[0].strip()
                 if part and part.lower() not in ("unnamed road",):
                     names.append(part)
         except Exception:
             continue
-    # Deduplicate while preserving order
-    seen = set(); uniq = []
+    seen=set(); uniq=[]
     for n in names:
-        k = n.lower()
+        k=n.lower()
         if k not in seen:
             seen.add(k); uniq.append(n)
     return uniq[:3]
-from math import radians, sin, cos, asin, sqrt
-from datetime import datetime, timezone
-from datetime import datetime, timezone, timedelta
+# === Enrichment cache ===
+if "enrich_cache" not in st.session_state:
+    st.session_state["enrich_cache"] = {}
 
-def ordinal(n: int) -> str:
-    n = int(n)
-    if 11 <= (n % 100) <= 13:
-        suff = "th"
-    else:
-        suff = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suff}"
+def _cache_get(rid):
+    return st.session_state["enrich_cache"].get(str(rid))
 
+def _cache_put(rid, data):
+    st.session_state["enrich_cache"][str(rid)] = data
 
-def format_day_month_uk(dts):
-    ts = pd.Timestamp(dts)
-    return f"{ordinal(ts.day)} {ts.strftime('%B')}"
-def format_full_uk_date(d: pd.Timestamp) -> str:
-    # Expect naive datetime64[ns]; convert to Timestamp if needed
-    ts = pd.Timestamp(d)
-    return f"{ts.strftime('%A')} {ordinal(ts.day)} {ts.strftime('%B')}"
+# --- GPX fallback utilities ---
+import xml.etree.ElementTree as ET
+import math
 
+def _haversine(lat1, lon1, lat2, lon2):
+    R = 6371000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return 2*R*math.asin(math.sqrt(a))
 
-
-# Try to import shared settings (optional)
-try:
-    from app_config import get_cfg
-except Exception:
-    def get_cfg(k, default=""):
-        return st.session_state.get(k, default)
-
-st.set_page_config(page_title="Weekly Social Post Composer", page_icon=":mega:", layout="wide")
-st.title("Weekly Social Post Composer")
-st.caption("Build: v2025.09.01-SOCIAL-19 — polished template, emoji rules, future-date picker, clipboard.")
-
-
-# ----------------------------- Helpers ----------------------------------
-
-from datetime import timedelta
-def to_thursday_date(ts):
+def _parse_gpx(gpx_bytes):
     try:
-        d = pd.to_datetime(ts, errors="coerce", dayfirst=True)
+        root = ET.fromstring(gpx_bytes)
     except Exception:
-        d = pd.to_datetime(ts, errors="coerce")
-    if pd.isna(d):
-        return None
-    # Ensure naive datetime (date-only OK)
+        return []
+    ns = {"gpx": "http://www.topografix.com/GPX/1/1"}
+    pts = []
+    for trkpt in root.findall(".//gpx:trkpt", ns):
+        lat = trkpt.get("lat"); lon = trkpt.get("lon")
+        if lat is None or lon is None:
+            continue
+        ele_el = trkpt.find("gpx:ele", ns)
+        ele = float(ele_el.text) if ele_el is not None else None
+        pts.append((float(lat), float(lon), ele))
+    return pts
+
+def _metrics_from_points(pts):
+    if len(pts) < 2:
+        return None, None
+    dist_m = 0.0
+    gain = 0.0
+    prev = pts[0]
+    for cur in pts[1:]:
+        dist_m += _haversine(prev[0], prev[1], cur[0], cur[1])
+        if prev[2] is not None and cur[2] is not None:
+            delta = cur[2] - prev[2]
+            if delta > 0:
+                gain += delta
+        prev = cur
+    return dist_m/1000.0, gain
+
+def fetch_strava_route_gpx_points(route_id, token):
     try:
-        d = d.tz_localize(None)
+        r = requests.get(f"https://www.strava.com/api/v3/routes/{route_id}/export_gpx",
+                         headers={"Authorization": f"Bearer {token}"},
+                         timeout=20)
+        if not r.ok:
+            return []
+        pts = _parse_gpx(r.content)
+        return pts
     except Exception:
-        pass
-    # 0=Mon ... 3=Thu
-    wd = int(d.weekday())
-    offset = (3 - wd) % 7
-    return (d + pd.to_timedelta(offset, unit="D"))
-def clean(x):
-    return "" if pd.isna(x) else str(x).strip()
+        return []
 
-def norm_header(h):
-    return re.sub(r"[^a-z0-9]+", "", str(h).strip().lower())
+def enrich_route(r):
+    rid = _extract_route_id(r.get("url") or r.get("rid"))
+    if not rid:
+        return r, {"source": "none", "note": "no route id/url"}
 
-def extract_sheet_id(url):
-    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
-    return m.group(1) if m else None
+    cached = _cache_get(rid)
+    if cached:
+        if cached.get("dist_km") is not None:
+            r["dist"] = cached["dist_km"]
+        if cached.get("elev_m") is not None and r.get("elev") is None:
+            r["elev"] = cached["elev_m"]
+        if not r.get("pois") and cached.get("pois"):
+            r["pois"] = ", ".join(cached["pois"])
+        return r, dict(cached, source="cache")
 
-def load_google_sheet_csv(sheet_id, sheet_name):
-    u = (
-        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-        "/gviz/tq?tqx=out:csv&sheet=" + urllib.parse.quote(sheet_name, safe="")
-    )
-    df = pd.read_csv(u, dtype=str, keep_default_na=False)
-    return df
+    tok = get_strava_token()
+    met = fetch_strava_route_metrics(r.get("url") or r.get("rid")) if tok else None
+    polyline = met.get("polyline") if met else None
+    dist_km = met.get("dist_km") if met else None
+    elev_m  = met.get("elev_m")  if met else None
+    source = "strava_meta" if met else "none"
 
-def load_schedule_gsheet(url):
-    sid = extract_sheet_id(url)
-    dfs = {}
-    if sid:
-        df = load_google_sheet_csv(sid, "Schedule")
-        if not df.empty:
-            dfs["Schedule"] = df
-    return dfs
+    sample = []
+    if tok and (dist_km is None or elev_m is None or not polyline):
+        pts = fetch_strava_route_gpx_points(rid, tok)
+        if pts:
+            d_km, g_m = _metrics_from_points(pts)
+            if dist_km is None and d_km:
+                dist_km = d_km
+                source = "gpx_fallback"
+            if elev_m is None and g_m is not None:
+                elev_m = g_m
+                source = "gpx_fallback"
+            if not polyline:
+                step = max(1, len(pts)//40)
+                sample = [(lat, lon) for (lat,lon,ele) in pts[::step]]
 
-def make_https(u):
-    u = (u or "").strip()
-    if not u:
-        return u
-    if " " in u or u.lower().startswith("strava route"):
-        return ""  # placeholder/invalid
-    if not urllib.parse.urlparse(u).scheme:
-        return "https://" + u
-    return u
+    pois = []
+    key = _get_secret("LOCATIONIQ_API_KEY") or _get_secret("LOCATIONIQ_TOKEN")
+    if key:
+        if polyline:
+            pois = fetch_locationiq_highlights(polyline)
+        elif sample:
+            names = []
+            for (lat, lon) in sample[:10]:
+                try:
+                    resp = requests.get(
+                        "https://eu1.locationiq.com/v1/reverse",
+                        params={"key": key, "lat": lat, "lon": lon, "format": "json"},
+                        timeout=10,
+                    )
+                    if resp.ok:
+                        d = resp.json()
+                        first = (d.get("display_name","").split(",")[0]).strip()
+                        if first and first.lower() not in ("unnamed road",):
+                            names.append(first)
+                except Exception:
+                    continue
+            seen=set(); uniq=[]
+            for n in names:
+                k=n.lower()
+                if k not in seen:
+                    seen.add(k); uniq.append(n)
+            pois = uniq[:3]
 
-STRAVA_ROUTE_ID_RE = re.compile(r"(?:^|/)(?:routes|routes/view)/(\\d+)(?:[/?#].*)?$", re.I)
+    if dist_km is not None:
+        r["dist"] = dist_km
+    if r.get("elev") is None and elev_m is not None:
+        r["elev"] = elev_m
+    if not r.get("pois") and pois:
+        r["pois"] = ", ".join(pois)
 
-def is_strava_route_url(u: str) -> bool:
-    if not u:
-        return False
-    lu = u.lower()
-    return ("strava.com" in lu) and ("/routes/" in lu)
-
-def extract_route_id_from_url(u: str) -> str:
-    m = STRAVA_ROUTE_ID_RE.search(u or "")
-    return m.group(1) if m else ""
-
-def extract_digits(s: str) -> str:
-    return "".join(re.findall(r"\\d+", s or ""))
-
-def expand_sci_id(s: str) -> str:
-    if not s:
-        return ""
-    s = s.strip()
-    m = re.match(r"^(\\d+)(?:\\.(\\d+))?[eE]\\+?(\\d+)$", s)
-    if not m:
-        return ""
-    int_part, frac_part, exp_str = m.group(1), (m.group(2) or ""), m.group(3)
-    try:
-        exp = int(exp_str)
-    except ValueError:
-        return ""
-    digits = int_part + frac_part
-    zeros_to_add = exp - len(frac_part)
-    if zeros_to_add >= 0:
-        return digits + ("0" * zeros_to_add)
-    else:
-        return digits
-
-def source_id_to_digits(s: str) -> str:
-    expanded = expand_sci_id(s)
-    return expanded if expanded else extract_digits(s)
-
-def extract_route_id(url: str, source_id: str) -> str:
-    rid = extract_route_id_from_url(url)
-    if rid:
-        return rid
-    return source_id_to_digits(source_id)
-
-# Hilliness descriptors with variation
-def hilliness_blurb(dist_km, elev_m):
-    phrases = {
-        "flat": ["flat and friendly 🏁", "fast & flat 🏁", "pan-flat cruise 💨"],
-        "rolling": ["gently rolling 🌱", "undulating and friendly 🌿", "rolling countryside vibes 🌳"],
-        "hilly": ["a hilly tester! ⛰️", "spicy climbs ahead 🌶️", "some punchy hills 🚵"],
-    }
-    if not dist_km or not elev_m:
-        return random.choice(["a great midweek spin", "perfect for all paces", "midweek miles made easy"])
-    try:
-        m_per_km = float(elev_m)/max(float(dist_km), 0.1)
-    except Exception:
-        return random.choice(["a great midweek spin", "perfect for all paces", "midweek miles made easy"])
-    key = "flat" if m_per_km < 10 else ("rolling" if m_per_km < 20 else "hilly")
-    return random.choice(phrases[key])
-    try:
-        m_per_km = float(elev_m)/max(float(dist_km), 0.1)
-    except Exception:
-        return random.choice(["a great midweek spin", "perfect for all paces", "midweek miles made easy"])
-    if m_per_km < 5:
-        return random.choice(phrases["flat"])
-    if m_per_km < 15:
-        return random.choice(phrases["rolling"])
-    return random.choice(phrases["hilly"])
-
-# Clipboard helper (JS injection)
-def copy_button(label, text, key):
-    escaped = text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$").replace("</", "<\\/")
-    btn_key = f"copy_btn_{key}"
-    html = f'''
-    <button id="{btn_key}" style="padding:6px 10px; border:1px solid #ddd; border-radius:6px; cursor:pointer;">📋 {label}</button>
-    <script>
-    const btn = document.getElementById("{btn_key}");
-    if (btn) {{
-        btn.addEventListener("click", async () => {{
-            try {{
-                await navigator.clipboard.writeText(`{escaped}`);
-                btn.innerText = "✅ Copied!";
-                setTimeout(() => btn.innerText = "📋 {label}", 1500);
-            }} catch (e) {{
-                btn.innerText = "❌ Copy failed";
-                setTimeout(() => btn.innerText = "📋 {label}", 1500);
-            }}
-        }});
-    }}
-    </script>
-    '''
-    st.markdown(html, unsafe_allow_html=True)
-
-
-# --------------------------- UX Settings ---------------------------------
-st.sidebar.header("Settings (session)")
-gs_default = st.sidebar.text_input("Default Google Sheet URL", value=get_cfg("GS_URL_DEFAULT"))
-if st.sidebar.button("Save as session default"):
-    st.session_state["GS_URL_DEFAULT"] = gs_default
-    st.sidebar.success("Saved for this session.")
-
-# ---------------------------- Input controls -----------------------------
-st.subheader("Pick a future date")
-gs_url = st.text_input("Google Sheet URL", value=get_cfg("GS_URL_DEFAULT"))
-
-if not gs_url:
-    st.stop()
-
-dfs = load_schedule_gsheet(gs_url)
-if "Schedule" not in dfs:
-    st.error("Could not load Schedule tab from the Google Sheet.")
-    st.stop()
-
-sched = dfs["Schedule"]
-sched.columns = [str(c) for c in sched.columns]
-cols = {c: norm_header(c) for c in sched.columns}
-
-def find_col(targets):
-    for c, n in cols.items():
-        for t in targets:
-            if t in n:
-                return c
-    return None
-
-date_col = "Date (Thu)"
-
-meet_loc_col = None
-for c in sched.columns:
-    if "meet" in c.lower() and "loc" in c.lower():
-        meet_loc_col = c
-        break
-notes_col = "Notes"
-
-r_names = ["Route 1 - Name", "Route 2 - Name"]
-r_urls = ["Route 1 - Route Link (Source URL)", "Route 2 - Route Link (Source URL)"]
-r_srcid = ["Route 1 - Source ID", "Route 2 - Source ID"]
-r_terrain = ["Route 1 - Terrain (Road/Trail/Mixed)", "Route 2 - Terrain (Road/Trail/Mixed)"]
-r_area = ["Route 1 - Area", "Route 2 - Area"]
-r_dist = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]
-r_elev = [None, None]
-r_pois = [None, None]
-
-if not date_col or not all(r_names) or not all(r_urls):
-    st.error("Missing required columns in Schedule (Date, Route Names, Route URLs).")
-    st.stop()
-
-# --- Future-only dropdown using pure date (no tz) ---
-d = pd.to_datetime(sched[date_col], errors="coerce", format="%Y-%m-%d %H:%M:%S")
-sched["_dateonly"] = d.dt.date
-today = pd.Timestamp.today().date()
-future_rows = sched[sched["_dateonly"] >= today]
-# Only Thursdays (Mon=0..Thu=3)
-future_rows = future_rows[pd.to_datetime(future_rows["_dateonly"]).dt.weekday == 3]
-future_rows = future_rows.sort_values("_dateonly")
-opt_idx = future_rows.index.tolist()
-def _fmt(idx):
-    return format_day_month_uk(pd.to_datetime(future_rows.loc[idx, "_dateonly"]))
-idx_choice = st.selectbox("Date", options=opt_idx, format_func=_fmt, index=0 if opt_idx else None)
-if idx_choice is None:
-    st.stop()
-row = future_rows.loc[idx_choice]
-
-
-
-def try_float(s):
-    """Extract first numeric value from strings like '8km', '1,200 m', '75m', or plain numbers."""
-    if s is None:
-        return None
-    try:
-        if isinstance(s, (int, float)):
-            return float(s)
-        t = str(s)
-        t = t.replace(',', '')
-        m = re.search(r"[-+]?\d*\.?\d+", t)
-        return float(m.group(0)) if m else None
-    except Exception:
-        return None
-
-def make_https(u):
-    u = (u or "").strip()
-    if not u:
-        return u
-    if " " in u or u.lower().startswith("strava route"):
-        return ""  # placeholder/invalid
-    if not urllib.parse.urlparse(u).scheme:
-        return "https://" + u
-    return u
-
-def extract_route_id(url: str, source_id: str) -> str:
-    m = STRAVA_ROUTE_ID_RE.search(url or "")
-    if m:
-        return m.group(1)
-    expanded = expand_sci_id(source_id)
-    return expanded if expanded else extract_digits(source_id)
-
-def build_route_dict(side_idx: int):
-    nm = clean(row.get(r_names[side_idx], ""))
-    url_raw = clean(row.get(r_urls[side_idx], ""))
-    sid_raw = clean(row.get(r_srcid[side_idx], "")) if r_srcid[side_idx] else ""
-    terr = clean(row.get(r_terrain[side_idx], "")) if r_terrain[side_idx] else ""
-    area = clean(row.get(r_area[side_idx], "")) if r_area[side_idx] else ""
-    url = make_https(url_raw)
-    rid = extract_route_id(url, sid_raw) if (url or sid_raw) else ""
-    dist = try_float(row.get(r_dist[side_idx], "")) if r_dist[side_idx] else None
-    elev = try_float(row.get(r_elev[side_idx], "")) if r_elev[side_idx] else None
-    pois = clean(row.get(r_pois[side_idx], "")) if r_pois[side_idx] else ""
-    return {"name": nm, "url": url, "rid": rid, "terrain": terr, "area": area,
-            "dist": dist, "elev": elev, "pois": pois}
+    _cache_put(rid, {"dist_km": dist_km, "elev_m": elev_m, "pois": pois, "source": source})
+    return r, {"dist_km": dist_km, "elev_m": elev_m, "pois": pois, "source": source}
 
 routes = [build_route_dict(0), build_route_dict(1)]
-# Try to enrich metrics & highlights from Strava + LocationIQ
+enrich_reports = []
 for r in routes:
-    if (r.get("dist") is None or r.get("elev") is None or not r.get("pois")) and (r.get("url") or r.get("rid")):
-        met = fetch_strava_route_metrics(r.get("url") or r.get("rid"))
-        if met:
-            if r.get("dist") is None and met.get("dist_km"):
-                r["dist"] = met["dist_km"]
-            if r.get("elev") is None and met.get("elev_m") is not None:
-                r["elev"] = met["elev_m"]
-            if not r.get("pois"):
-                hi = fetch_locationiq_highlights(met.get("polyline"))
-                if hi:
-                    r["pois"] = ", ".join(hi)
+    if (r.get("url") or r.get("rid")):
+        r, rep = enrich_route(r)
+        enrich_reports.append(rep)
+    else:
+        enrich_reports.append({"source":"none","note":"no url"})
+with st.expander("Debug: enrichment", expanded=False):
+    try:
+        st.json(enrich_reports)
+    except Exception:
+        st.write(enrich_reports)
+
+for r in routes:
+    if (r.get("url") or r.get("rid")):
+        r, rep = enrich_route(r)
+        enrich_reports.append(rep)
+    else:
+        enrich_reports.append({"source":"none","note":"no url"})
+with st.expander("Debug: enrichment", expanded=False):
+    try:
+        st.json(enrich_reports)
+    except Exception:
+        st.write(enrich_reports)
 
 # Label longer = 8k, shorter = 5k (if distances available)
 def sort_with_labels(r1, r2):
@@ -499,7 +348,7 @@ def route_blurb(label, r):
     url = r["url"] or (f"https://www.strava.com/routes/{r['rid']}" if r["rid"] else "")
     name = r["name"] or "Route"
     line1 = f"• {label} – {name}" + (f": {url}" if url else "")
-    line2 = f"  {dist_txt} – {desc}"
+    line2 = f"  {dist_txt}" + (f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int, float)) else "") + f" – {desc}"
     highlights = ""
     if r.get("pois"):
         chunks = [c.strip() for c in str(r["pois"]).split("|") if c.strip()]
