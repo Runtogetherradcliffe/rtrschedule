@@ -873,10 +873,6 @@ lines.append("")
 if is_road:
     lines.append(SAFETY_NOTE)
     lines.append("")
-if is_road:
-    lines.append(SAFETY_NOTE)
-    lines.append("")
-
 
 lines.append("📲 Book now:")
 lines.append("https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
