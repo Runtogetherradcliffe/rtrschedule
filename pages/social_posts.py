@@ -708,6 +708,67 @@ date_str = format_day_month_uk(pd.to_datetime(row["_dateonly"]))
 time_line = "🕖 We set off at 7:00pm"
 meeting_line = f"📍 Meeting at: {meet_loc.title()}"
 
+def onroute_road_names(polyline: str | None, *, max_pts: int = 40) -> list[str]:
+    """
+    Return ordered road/footpath names by reverse-geocoding points sampled along the route polyline.
+    Uses LocationIQ Reverse (same config as Fetch POIs). De-duplicates consecutive names.
+    """
+    if not polyline:
+        return []
+    key = get_locationiq_key()
+    if not key:
+        return []
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    names: list[str] = []
+    last = ""
+    for lat, lon in pts:
+        nm = None
+        for z in (18, 17, 16):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "zoom": z,
+                    },
+                    timeout=8,
+                )
+                if not r.ok:
+                    continue
+                js = r.json() or {}
+                a = js.get("address") or {}
+                for k in ("road","pedestrian","footway","path","cycleway","residential"):
+                    v = a.get(k)
+                    if v:
+                        nm = str(v).strip()
+                        break
+                if nm:
+                    break
+            except Exception:
+                continue
+        if nm and nm.lower() != "unnamed road" and (not last or nm.lower() != last.lower()):
+            names.append(nm)
+            last = nm
+    return names
+
+def roads_sentence(names: list[str]) -> str:
+    if not names:
+        return ""
+    parts = []
+    for i, n in enumerate(names):
+        if i == 0:
+            parts.append(f"along {n}")
+        else:
+            parts.append(f"then along {n}")
+    return "We’ll be running " + ", ".join(parts) + "."
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
@@ -721,21 +782,28 @@ def route_blurb(label, r: dict) -> str:
     line1 = f"• {label} – {name}" + (f": {url}" if url else "")
     elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int,float)) else ""
     line2 = f"  {dist_txt}{elev_part} – {desc}"
-    highlights = ""
-    if r.get("pois"):
-        parts = []
-        for ch in str(r["pois"]).split("|"):
-            parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
-        if parts:
-            # dedupe and keep first 3
-            seen=set(); uniq=[]
-            for p in parts:
-                k=p.lower()
-                if k not in seen:
-                    seen.add(k); uniq.append(p)
-            highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
+
+    # Prefer ordered road names from the actual route over generic POI highlights
+    roads = onroute_road_names(r.get("polyline"))
     lines = [line1, line2]
-    if highlights: lines.append("  " + highlights)
+    if roads:
+        lines.append("  " + roads_sentence(roads))
+    else:
+        # Fallback to POI highlights if roads not available
+        highlights = ""
+        if r.get("pois"):
+            parts = []
+            for ch in str(r["pois"]).split("|"):
+                parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
+            if parts:
+                seen=set(); uniq=[]
+                for p in parts:
+                    k=p.lower()
+                    if k not in seen:
+                        seen.add(k); uniq.append(p)
+                highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
+        if highlights:
+            lines.append("  " + highlights)
     return "\n".join(lines)
 
 # Order long/short by distance if available
