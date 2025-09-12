@@ -182,7 +182,7 @@ def locationiq_reverse(lat: float, lon: float, api_key: str):
 
 # ---------------------------- Load from Google Sheet ----------------------
 st.subheader("Load your Schedule (Google Sheet)")
-gs_url = st.text_input("Google Sheet URL")
+gs_url = st.text_input("Google Sheet URL", value="https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing", disabled=True)
 dfs = None
 if gs_url:
     try:

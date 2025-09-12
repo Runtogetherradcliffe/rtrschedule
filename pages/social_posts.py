@@ -524,7 +524,7 @@ def enrich_route_dict(r: dict) -> dict:
 st.title("Weekly Social Post Composer")
 st.caption("Build: v2025.09.01-SOCIAL-24 — date-only parsing, Strava/LocationIQ enrichment")
 
-sheet_url = st.text_input("Google Sheet URL", value=get_cfg("SHEET_CSV_URL", get_cfg("SHEET_URL","")))
+sheet_url = st.text_input("Google Sheet URL", value="https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing", disabled=True)))
 if not sheet_url:
     st.info("Paste your Google Sheet (the master schedule).")
     st.stop()

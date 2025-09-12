@@ -216,7 +216,7 @@ mode = st.radio("Load data from:", ["Google Sheet (CSV)", "Upload Excel (.xlsx)"
 
 dfs = None
 if mode.startswith("Google"):
-url = "https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing"
+    url = st.text_input("Google Sheet URL", value="https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing", disabled=True)
     if url:
         try:
             dfs = load_from_google_csv(url)
