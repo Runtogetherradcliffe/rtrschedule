@@ -1,5 +1,9 @@
-# Running Club App — Strava API validation
+# RunTogether Radcliffe — Schedule App
 
-- Validates Strava ROUTE links via Strava API when connected
-- Marks unauthenticated Strava links as 'Needs Auth/Not Public' instead of 'Broken'
-- Export GPX via /routes/{id}/export_gpx
+Hard-wired Streamlit app for the club's Google Sheet (Schedule tab).
+
+## Features
+- Shows next run (always: "We set off at 7:00pm")
+- Social Run filter
+- Poster generator
+- Holiday rules built-in
