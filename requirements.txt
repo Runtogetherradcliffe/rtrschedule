@@ -1,3 +1,5 @@
-streamlit>=1.35
-pandas>=2.2
-pillow>=10.3
+streamlit
+pandas
+requests
+polyline
+stravalib
