@@ -792,6 +792,10 @@ lines.append("🛣️ This week we’ve got two route options to choose from:")
 lines.append(route_blurb(labeled[0][0], labeled[0][1]))
 lines.append(route_blurb(labeled[1][0], labeled[1][1]))
 lines.append("")
+if is_road:
+    lines.append(SAFETY_NOTE)
+    lines.append("")
+
 lines.append("📲 Book now:")
 lines.append("https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append("❌ Can’t make it? Cancel at least 1 hour before:")
