@@ -937,7 +937,9 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 120):
         else:
             merged[-1]["coords"].extend(seg["coords"])
 
-    return mergeddef describe_turns_sentence(route_dict: dict, *, max_segments: int = 10):
+    return merged
+
+def describe_turns_sentence(route_dict: dict, *, max_segments: int = 10):
     """Build a natural sentence with up/down and left/right joins based on segment bearings and slope."""
     names = []
     segs = onroute_named_segments(route_dict.get("polyline"))
