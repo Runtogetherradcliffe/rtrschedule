@@ -808,19 +808,170 @@ def describe_keyroads_sentence_fancy(names: list[str]) -> str:
                 parts.append(f"then {verb} {use_article}{name}".strip())
     return "We’ll be running " + ", ".join(parts) + "."
 
-def route_blurb(label, r: dict) -> str:
-    if isinstance(r.get("dist"), (int,float)):
-        dist_txt = f"{r['dist']:.1f} km"
-    elif r.get("dist") is not None:
-        dist_txt = f"{r['dist']} km"
+
+import math
+
+def _bearing(p1, p2):
+    (lat1, lon1), (lat2, lon2) = p1, p2
+    lat1 = math.radians(lat1); lat2 = math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    y = math.sin(dlon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    brng = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+    return brng
+
+def _turn_word(delta_deg):
+    # delta in (-180..180], positive = right turn
+    if delta_deg > 50:  return "turn right onto"
+    if delta_deg > 20:  return "bear right onto"
+    if delta_deg < -50: return "turn left onto"
+    if delta_deg < -20: return "bear left onto"
+    return "continue onto"
+
+def _segment_slope(segment_pts, elev_pts):
+    if not elev_pts or not segment_pts or len(segment_pts) < 2:
+        return 0.0
+    # Nearest-neighbour elevation lookup
+    def _nearest_el(lat, lon):
+        best, bestd = None, 1e9
+        for (la, lo, el) in elev_pts:
+            d = (la-lat)*(la-lat)+(lo-lon)*(lo-lon)
+            if d < bestd and el is not None:
+                bestd, best = d, el
+        return best
+    start_el = _nearest_el(*segment_pts[0])
+    end_el   = _nearest_el(*segment_pts[-1])
+    if start_el is None or end_el is None:
+        return 0.0
+    return float(end_el - start_el)
+
+def _choose_updown(delta_el):
+    if delta_el > 3:  return "up"
+    if delta_el < -3: return "down"
+    return "along"
+
+def onroute_named_segments(polyline: str, *, max_pts: int = 50):
+    """Group sampled polyline points by reverse-geocoded road name; return segments with coords."""
+    if not polyline:
+        return []
+    key = get_locationiq_key()
+    if not key:
+        return []
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    segs = []
+    last_name = None
+    for lat, lon in pts:
+        nm = None
+        for z in (18, 17, 16):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key, "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+                        "format": "json", "normalizeaddress": 1, "addressdetails": 1, "zoom": z,
+                    },
+                    timeout=8,
+                )
+                if not r.ok: continue
+                js = r.json() or {}
+                a = js.get("address") or {}
+                for k in ("road","pedestrian","footway","path","cycleway","residential"):
+                    v = a.get(k)
+                    if v:
+                        nm = str(v).strip()
+                        break
+                if nm: break
+            except Exception:
+                continue
+        if not nm or nm.lower() == "unnamed road":
+            nm = None
+        if not segs or (nm or "") != (last_name or ""):
+            segs.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
+            last_name = nm or "Unnamed"
+        else:
+            segs[-1]["coords"].append((lat, lon))
+    # Drop leading/trailing 'Unnamed' segments
+    segs = [s for s in segs if s["name"] and s["name"].lower() != "unnamed"]
+    return segs
+
+def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
+    """Build a natural sentence with up/down and left/right joins based on segment bearings and slope."""
+    names = []
+    segs = onroute_named_segments(route_dict.get("polyline"))
+    if not segs:
+        return ""
+    # Try to fetch Strava GPX points with elevation for slope
+    elev_pts = None
+    try:
+        rid = _extract_route_id(route_dict.get("url") or route_dict.get("rid"))
+        tok = get_strava_token()
+        if rid and tok:
+            elev_pts = fetch_strava_route_gpx_points(rid, tok)
+    except Exception:
+        pass
+
+    parts = []
+    path_like = ("path","towpath","trail","canal","promenade","greenway","footpath")
+    # First segment
+    first = segs[0]
+    verb0 = _choose_updown(_segment_slope(first.get("coords"), elev_pts)) if elev_pts else "along"
+    art0 = "the " if any(t in first["name"].lower() for t in path_like) and not first["name"].lower().startswith("the ") else ""
+    parts.append(f"{verb0} {art0}{first['name']}".strip())
+
+    # Subsequent segments
+    for i in range(1, min(len(segs), max_segments)):
+        prev = segs[i-1]; cur = segs[i]
+        # Determine bearings
+        def _seg_bearing(seg):
+            pts = seg.get("coords") or []
+            if len(pts) >= 2:
+                return _bearing(pts[-2], pts[-1])
+            if len(pts) == 1 and prev.get("coords"):
+                return _bearing(prev["coords"][-1], pts[0])
+            return None
+
+        b_prev = _seg_bearing(prev)
+        b_cur  = _seg_bearing(cur)
+        delta = None
+        if b_prev is not None and b_cur is not None:
+            d = (b_cur - b_prev + 540.0) % 360.0 - 180.0
+            delta = d
+        # Choose connector
+        art = "the " if any(t in cur["name"].lower() for t in path_like) and not cur["name"].lower().startswith("the ") else ""
+        if delta is None:
+            connector = "then onto"
+        else:
+            connector = _turn_word(delta)
+        parts.append(f"{connector} {art}{cur['name']}")
+
+    return "We’ll be running " + ", ".join(parts) + "."
+
+
+    # Prefer ordered turn-based road description over highlights
+    sentence = describe_turns_sentence(r)
+    lines = [line1, line2]
+    if sentence:
+        lines.append("  " + sentence)
     else:
-        dist_txt = "? km"
-    desc = hilliness_blurb(r.get("dist"), r.get("elev"))
-    url = r.get("url") or (f"https://www.strava.com/routes/{r.get('rid')}" if r.get("rid") else "")
-    name = r.get("name") or "Route"
-    line1 = f"• {label} – {name}" + (f": {url}" if url else "")
-    elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int,float)) else ""
-    line2 = f"  {dist_txt}{elev_part} – {desc}"
+        # Fallback to old highlights logic
+        highlights = ""
+        if r.get("pois"):
+            parts = []
+            for ch in str(r["pois"]).split("|"):
+                parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
+            if parts:
+                seen=set(); uniq=[]
+                for p in parts:
+                    k=p.lower()
+                    if k not in seen:
+                        seen.add(k); uniq.append(p)
+                highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
+        if highlights:
+            lines.append("  " + highlights)
+    return "\n".join(lines)
 
     # Prefer ordered road names from the actual route over generic POI highlights
     roads = onroute_road_names(r.get("polyline"))
