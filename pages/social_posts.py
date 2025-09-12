@@ -1058,3 +1058,9 @@ def derive_keyroads_from_title(name: str):
                 prev = p
     return out
 
+
+def _as_segments(names):
+    segs = []
+    for n in names or []:
+        segs.append({"name": n, "coords": None})
+    return segs
