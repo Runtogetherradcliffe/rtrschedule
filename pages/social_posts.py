@@ -858,11 +858,11 @@ lines.append(time_line)
 lines.append("")
 lines.append("🛣️ This week we’ve got two route options to choose from:")
 lines.append(route_blurb(labeled[0][0], labeled[0][1]))
-if labeled[0][0].get("keyroads"):
-    lines.append("We\'ll be running " + ", then ".join(labeled[0][0]["keyroads"]) + ".")
+if labeled[0][1].get("keyroads"):
+    lines.append("We\'ll be running " + ", then ".join(labeled[0][1]["keyroads"]) + ".")
 lines.append(route_blurb(labeled[1][0], labeled[1][1]))
-if labeled[1][0].get("keyroads"):
-    lines.append("We\'ll be running " + ", then ".join(labeled[1][0]["keyroads"]) + ".")
+if labeled[1][1].get("keyroads"):
+    lines.append("We\'ll be running " + ", then ".join(labeled[1][1]["keyroads"]) + ".")
 lines.append("")
 if is_road:
     lines.append(SAFETY_NOTE)
