@@ -525,6 +525,10 @@ def enrich_route_dict(r: dict) -> dict:
             type_val = None
     if type_val is not None and str(type_val).strip().lower() == "road":
         keyroads = locationiq_key_roads2(polyline=polyline, sample_points=sample)
+        if not keyroads:
+            keyroads = [{"name": n, "coords": None} for n in locationiq_onroute_keyroads(polyline=polyline, sample_points=sample)]
+        if not keyroads:
+            keyroads = [{"name": n, "coords": None} for n in derive_keyroads_from_title(r.get("name",""))]
     out = dict(r)
     
     if keyroads:
@@ -982,4 +986,75 @@ def describe_keyroads_sentence(segments, elev_pts=None):
                 phrase = f"then {verb} {use_article}{name}".strip()
         parts.append(phrase)
     return "We’ll be running " + ", ".join(parts) + "."
+
+
+
+def locationiq_onroute_keyroads(polyline=None, sample_points=None, *, max_pts: int = 40):
+    """
+    Ordered 'key roads' from reverse geocoding sampled *on* the route.
+    Uses LocationIQ Reverse (same config as Fetch POIs). Deduplicates consecutive names.
+    """
+    key = get_locationiq_key()
+    if not key:
+        return []
+    base = _get_secret("LOCATIONIQ_BASE") or "us1"
+    pts = sample_points or _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    names = []
+    last = ""
+    for lat, lon in pts:
+        nm = None
+        for z in (18, 17):
+            try:
+                r = requests.get(
+                    f"https://{base}.locationiq.com/v1/reverse",
+                    params={
+                        "key": key,
+                        "lat": f"{lat:.6f}",
+                        "lon": f"{lon:.6f}",
+                        "format": "json",
+                        "normalizeaddress": 1,
+                        "addressdetails": 1,
+                        "zoom": z,
+                    },
+                    timeout=8,
+                )
+                if not r.ok:
+                    continue
+                js = r.json() or {}
+                a = js.get("address") or {}
+                for k in ("road","pedestrian","footway","path","cycleway"):
+                    v = a.get(k)
+                    if v:
+                        nm = v.strip()
+                        break
+                if nm:
+                    break
+            except Exception:
+                continue
+        if nm and nm.lower() != "unnamed road" and (not last or nm.lower() != last.lower()):
+            names.append(nm)
+            last = nm
+    return names
+
+
+
+def derive_keyroads_from_title(name: str):
+    """Fallback: infer ordered tokens from a route title like 'A-B-C'."""
+    if not isinstance(name, str): 
+        return []
+    raw = name.strip()
+    if not raw:
+        return []
+    parts = re.split(r"\s*[–—-]>?\s*|\s*>\s*|\s*then\s*|\s*,\s*|\s*;\s*", raw)
+    out = []
+    prev = ""
+    for p in parts:
+        p = p.strip()
+        if len(p) >= 3 and not p.lower().startswith(("http://","https://")):
+            if p.lower() != prev.lower():
+                out.append(p)
+                prev = p
+    return out
 
