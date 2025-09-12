@@ -642,6 +642,42 @@ def build_route_dict(side_idx: int) -> dict:
 
 routes = [build_route_dict(0), build_route_dict(1)]
 
+# Safety note: detect "Road" from column E or terrain/type fields
+def _is_road_value(v):
+    try:
+        return str(v).strip().lower() == "road"
+    except Exception:
+        return False
+
+is_road = False
+# Prefer explicit "Type" column if present
+try:
+    if "Type" in sched.columns:
+        is_road = is_road or _is_road_value(row.get("Type"))
+except Exception:
+    pass
+# Global "Terrain" column, if any
+try:
+    if "Terrain" in sched.columns:
+        is_road = is_road or _is_road_value(row.get("Terrain"))
+except Exception:
+    pass
+# Route-specific terrain columns
+for _tc in r_terrain:
+    try:
+        if _tc and _tc in sched.columns:
+            is_road = is_road or _is_road_value(row.get(_tc))
+    except Exception:
+        pass
+# Fallback: column E (index 4), if exists
+try:
+    is_road = is_road or _is_road_value(row.iloc[4])
+except Exception:
+    pass
+
+SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
+
+
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
