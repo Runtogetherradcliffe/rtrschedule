@@ -769,6 +769,45 @@ def roads_sentence(names: list[str]) -> str:
         else:
             parts.append(f"then along {n}")
     return "We’ll be running " + ", ".join(parts) + "."
+
+def _choose_verb(name: str) -> str:
+    """Heuristic: pick 'up', 'down', or 'along' from the road name."""
+    if not isinstance(name, str):
+        return "along"
+    n = name.lower()
+    uphill_tokens = (" hill", " bank", " rise", " mount", " climb", " ascent")
+    downhill_tokens = (" down", " lower", " descent", " dale", " bottom")
+    if any(tok in n for tok in uphill_tokens):
+        return "up"
+    if any(tok in n for tok in downhill_tokens):
+        return "down"
+    return "along"
+
+def describe_keyroads_sentence_fancy(names: list[str]) -> str:
+    """
+    Build a natural sentence:
+      - 'up'/'down' for obvious hill-ish names; otherwise 'along'
+      - 'join the' when the segment looks like a path/towpath/canal/etc
+    """
+    if not names:
+        return ""
+    path_like = ("path", "towpath", "trail", "canal", "promenade", "greenway", "footpath")
+    parts = []
+    for i, raw in enumerate(names):
+        name = str(raw).strip()
+        lower = name.lower()
+        use_article = "the " if any(t in lower for t in path_like) and not lower.startswith("the ") else ""
+        if i == 0:
+            verb = _choose_verb(name)
+            parts.append(f"{verb} {use_article}{name}".strip())
+        else:
+            if any(t in lower for t in path_like):
+                parts.append(f"then join {use_article}{name}")
+            else:
+                verb = _choose_verb(name)
+                parts.append(f"then {verb} {use_article}{name}".strip())
+    return "We’ll be running " + ", ".join(parts) + "."
+
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
