@@ -56,7 +56,7 @@ mode = st.radio("Load data from:", ["Google Sheet (CSV export — recommended)",
 
 dfs = {}
 if mode.startswith("Google"):
-    url = ("https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing") if False else "https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing"
+url = "https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing"
     if url:
         sid = extract_sheet_id(url)
         if sid:

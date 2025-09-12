@@ -511,92 +511,20 @@ def enrich_route_dict(r: dict) -> dict:
         if pois_list:
             pois = ", ".join(pois_list)
 
-    
-    # Road-season: derive ordered road names using Map Matching if possible
-    keyroads = []
-    try:
-        type_val = row.get("Type")
-    except Exception:
-        type_val = None
-    if type_val is None and "Terrain" in sched.columns:
-        try:
-            type_val = row.get("Terrain")
-        except Exception:
-            type_val = None
-    if type_val is not None and str(type_val).strip().lower() == "road":
-        keyroads = locationiq_key_roads2(polyline=polyline, sample_points=sample)
-        if not keyroads:
-            keyroads = [{"name": n, "coords": None} for n in locationiq_onroute_keyroads(polyline=polyline, sample_points=sample)]
-        if not keyroads:
-            keyroads = [{"name": n, "coords": None} for n in derive_keyroads_from_title(r.get("name",""))]
     out = dict(r)
-    
-    if keyroads:
-        out["keyroads"] = keyroads
-        if out.get("pois"):
-            del out["pois"]
     out["dist"] = dist_km
     out["polyline"] = polyline
     if elev_m is not None: out["elev"] = elev_m
     if pois: out["pois"] = pois
     return out
 
-
-# Map-matched key roads from a polyline using LocationIQ Matching API
-def locationiq_key_roads(polyline=None, sample_points=None, *, debug: bool = False):
-    """
-    Return an ordered list of road names along the route using LocationIQ's Matching API.
-    - Uses steps=true so each step has a 'name' (road name).
-    - De-duplicates consecutive names and drops 'unnamed road'.
-    - Accepts either an encoded polyline or a list of (lat, lon) sample_points.
-    """
-    base = _get_secret("LOCATIONIQ_BASE") or "us1"
-    key = (_get_secret("LOCATIONIQ_API_KEY")
-           or _get_secret("LOCATIONIQ_TOKEN")
-           or os.environ.get("LOCATIONIQ_API_KEY")
-           or os.environ.get("LOCATIONIQ_TOKEN"))
-    if not key:
-        return []
-
-    pts = sample_points or _sample_points(polyline, max_pts=95)
-    if not pts:
-        return []
-
-    coords = ";".join([f"{lon:.6f},{lat:.6f}" for (lat, lon) in pts])
-    url = f"https://{base}.locationiq.com/v1/matching/driving/{coords}"
-    try:
-        r = requests.get(url, params={
-            "key": key,
-            "steps": "true",
-            "geometries": "geojson",
-            "overview": "false",
-        }, timeout=20)
-        if not r.ok:
-            return []
-        j = r.json()
-    except Exception:
-        return []
-
-    names = []
-    try:
-        for m in (j.get("matchings") or []):
-            for leg in (m.get("legs") or []):
-                for step in (leg.get("steps") or []):
-                    nm = (step.get("name") or "").strip()
-                    if nm and nm.lower() != "unnamed road":
-                        if not names or names[-1].lower() != nm.lower():
-                            names.append(nm)
-    except Exception:
-        return []
-
-    return names
 # ----------------------------
 # UI: Sheet URL + load
 # ----------------------------
 st.title("Weekly Social Post Composer")
 st.caption("Build: v2025.09.01-SOCIAL-24 — date-only parsing, Strava/LocationIQ enrichment")
 
-sheet_url = "https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing"
+sheet_url = st.text_input("Google Sheet URL", value=get_cfg("SHEET_CSV_URL", get_cfg("SHEET_URL","")))
 if not sheet_url:
     st.info("Paste your Google Sheet (the master schedule).")
     st.stop()
@@ -714,42 +642,6 @@ def build_route_dict(side_idx: int) -> dict:
 
 routes = [build_route_dict(0), build_route_dict(1)]
 
-# Safety note: detect "Road" from column E or terrain/type fields
-def _is_road_value(v):
-    try:
-        return str(v).strip().lower() == "road"
-    except Exception:
-        return False
-
-is_road = False
-# Prefer explicit "Type" column if present
-try:
-    if "Type" in sched.columns:
-        is_road = is_road or _is_road_value(row.get("Type"))
-except Exception:
-    pass
-# Global "Terrain" column, if any
-try:
-    if "Terrain" in sched.columns:
-        is_road = is_road or _is_road_value(row.get("Terrain"))
-except Exception:
-    pass
-# Route-specific terrain columns
-for _tc in r_terrain:
-    try:
-        if _tc and _tc in sched.columns:
-            is_road = is_road or _is_road_value(row.get(_tc))
-    except Exception:
-        pass
-# Fallback: column E (index 4), if exists
-try:
-    is_road = is_road or _is_road_value(row.iloc[4])
-except Exception:
-    pass
-
-SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
-
-
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
@@ -861,23 +753,9 @@ lines.append(meeting_line)
 lines.append(time_line)
 lines.append("")
 lines.append("🛣️ This week we’ve got two route options to choose from:")
-txt = route_blurb(labeled[0][0], labeled[0][1])
-if is_road:
-    txt = "\n".join([ln for ln in txt.splitlines() if not ln.strip().startswith("🏞️ Highlights:")])
-lines.append(txt)
-if labeled[0][1].get("keyroads"):
-    lines.append("We\'ll be running " + ", then ".join(labeled[0][1]["keyroads"]) + ".")
-txt = route_blurb(labeled[1][0], labeled[1][1])
-if is_road:
-    txt = "\n".join([ln for ln in txt.splitlines() if not ln.strip().startswith("🏞️ Highlights:")])
-lines.append(txt)
-if labeled[1][1].get("keyroads"):
-    lines.append("We\'ll be running " + ", then ".join(labeled[1][1]["keyroads"]) + ".")
+lines.append(route_blurb(labeled[0][0], labeled[0][1]))
+lines.append(route_blurb(labeled[1][0], labeled[1][1]))
 lines.append("")
-if is_road:
-    lines.append(SAFETY_NOTE)
-    lines.append("")
-
 lines.append("📲 Book now:")
 lines.append("https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append("❌ Can’t make it? Cancel at least 1 hour before:")
@@ -891,176 +769,3 @@ post_text = "\n".join(lines)
 
 st.subheader("Composed message")
 st.text_area("Copy/paste to socials", value=post_text, height=420)
-
-# === Key-roads helpers (elevation-aware phrasing) ===
-def locationiq_key_roads2(polyline=None, sample_points=None, *, debug: bool = False):
-    base = _get_secret("LOCATIONIQ_BASE") or "us1"
-    key = (_get_secret("LOCATIONIQ_API_KEY")
-           or _get_secret("LOCATIONIQ_TOKEN")
-           or os.environ.get("LOCATIONIQ_API_KEY")
-           or os.environ.get("LOCATIONIQ_TOKEN"))
-    if not key:
-        return []
-
-    pts = sample_points or _sample_points(polyline, max_pts=95)
-    if not pts:
-        return []
-
-    coords = ";".join([f"{lon:.6f},{lat:.6f}" for (lat, lon) in pts])
-    url = f"https://{base}.locationiq.com/v1/matching/driving/{coords}"
-    try:
-        r = requests.get(url, params={
-            "key": key,
-            "steps": "true",
-            "geometries": "geojson",
-            "overview": "false",
-        }, timeout=20)
-        if not r.ok:
-            return []
-        j = r.json()
-    except Exception:
-        return []
-
-    segments = []
-    prev_name = None
-    try:
-        for m in (j.get("matchings") or []):
-            for leg in (m.get("legs") or []):
-                for step in (leg.get("steps") or []):
-                    nm = (step.get("name") or "").strip()
-                    if not nm or nm.lower() == "unnamed road":
-                        continue
-                    coords = []
-                    try:
-                        for lon, lat in (step.get("geometry", {}).get("coordinates") or []):
-                            coords.append((lat, lon))
-                    except Exception:
-                        coords = []
-                    if prev_name is not None and segments and nm.lower() == prev_name.lower():
-                        segments[-1]["coords"].extend(coords)
-                    else:
-                        segments.append({"name": nm, "coords": coords})
-                    prev_name = nm
-    except Exception:
-        return []
-
-    return segments
-
-def _nearest_elev(lat, lon, elev_pts):
-    if not elev_pts:
-        return None
-    best = None
-    best_d = 1e9
-    for (la, lo, el) in elev_pts:
-        d = (la-lat)**2 + (lo-lon)**2
-        if d < best_d:
-            best_d = d
-            best = el
-    return best
-
-def describe_keyroads_sentence(segments, elev_pts=None):
-    if not segments:
-        return ""
-    path_tokens_with_article = ["path","towpath","trail","canal","promenade"]
-    parts = []
-    for i, seg in enumerate(segments):
-        name = seg.get("name","").strip()
-        coords = seg.get("coords") or []
-        verb = "along"
-        if elev_pts and coords:
-            start_el = _nearest_elev(coords[0][0], coords[0][1], elev_pts)
-            end_el = _nearest_elev(coords[-1][0], coords[-1][1], elev_pts)
-            if start_el is not None and end_el is not None:
-                delta = end_el - start_el
-                if delta > 3: verb = "up"
-                elif delta < -3: verb = "down"
-                else: verb = "along"
-        nm_low = name.lower()
-        use_article = "the " if (not nm_low.startswith("the ") and any(t in nm_low for t in path_tokens_with_article)) else ""
-        if i == 0:
-            phrase = f"{verb} {use_article}{name}".strip()
-        else:
-            if any(t in nm_low for t in path_tokens_with_article):
-                phrase = f"then join {use_article}{name}"
-            else:
-                phrase = f"then {verb} {use_article}{name}".strip()
-        parts.append(phrase)
-    return "We’ll be running " + ", ".join(parts) + "."
-
-
-
-def locationiq_onroute_keyroads(polyline=None, sample_points=None, *, max_pts: int = 40):
-    """
-    Ordered 'key roads' from reverse geocoding sampled *on* the route.
-    Uses LocationIQ Reverse (same config as Fetch POIs). Deduplicates consecutive names.
-    """
-    key = get_locationiq_key()
-    if not key:
-        return []
-    base = _get_secret("LOCATIONIQ_BASE") or "us1"
-    pts = sample_points or _sample_points(polyline, max_pts=max_pts)
-    if not pts:
-        return []
-    names = []
-    last = ""
-    for lat, lon in pts:
-        nm = None
-        for z in (18, 17):
-            try:
-                r = requests.get(
-                    f"https://{base}.locationiq.com/v1/reverse",
-                    params={
-                        "key": key,
-                        "lat": f"{lat:.6f}",
-                        "lon": f"{lon:.6f}",
-                        "format": "json",
-                        "normalizeaddress": 1,
-                        "addressdetails": 1,
-                        "zoom": z,
-                    },
-                    timeout=8,
-                )
-                if not r.ok:
-                    continue
-                js = r.json() or {}
-                a = js.get("address") or {}
-                for k in ("road","pedestrian","footway","path","cycleway"):
-                    v = a.get(k)
-                    if v:
-                        nm = v.strip()
-                        break
-                if nm:
-                    break
-            except Exception:
-                continue
-        if nm and nm.lower() != "unnamed road" and (not last or nm.lower() != last.lower()):
-            names.append(nm)
-            last = nm
-    return names
-
-
-
-def derive_keyroads_from_title(name: str):
-    """Fallback: infer ordered tokens from a route title like 'A-B-C'."""
-    if not isinstance(name, str): 
-        return []
-    raw = name.strip()
-    if not raw:
-        return []
-    parts = re.split(r"\s*[–—-]>?\s*|\s*>\s*|\s*then\s*|\s*,\s*|\s*;\s*", raw)
-    out = []
-    prev = ""
-    for p in parts:
-        p = p.strip()
-        if len(p) >= 3 and not p.lower().startswith(("http://","https://")):
-            if p.lower() != prev.lower():
-                out.append(p)
-                prev = p
-    return out
-
-
-def _as_segments(names):
-    segs = []
-    for n in names or []:
-        segs.append({"name": n, "coords": None})
-    return segs
