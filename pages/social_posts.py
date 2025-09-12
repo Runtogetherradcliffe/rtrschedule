@@ -850,18 +850,34 @@ def _choose_updown(delta_el):
     if delta_el < -3: return "down"
     return "along"
 
-def onroute_named_segments(polyline: str, *, max_pts: int = 50):
-    """Group sampled polyline points by reverse-geocoded road name; return segments with coords."""
+def onroute_named_segments(polyline: str, *, max_pts: int = 120):
+    """Group sampled polyline points by reverse-geocoded road name; strict filtering by segment length/coverage."""
     if not polyline:
         return []
     key = get_locationiq_key()
     if not key:
         return []
     base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+
+    def haversine(a, b):
+        lat1, lon1 = a; lat2, lon2 = b
+        R = 6371000.0
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
+        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
+        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
+
     pts = _sample_points(polyline, max_pts=max_pts)
     if not pts:
         return []
-    segs = []
+
+    # Total route length approximation
+    tot_len = 0.0
+    for i in range(1, len(pts)):
+        tot_len += haversine(pts[i-1], pts[i])
+
+    raw = []
     last_name = None
     for lat, lon in pts:
         nm = None
@@ -888,16 +904,40 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 50):
                 continue
         if not nm or nm.lower() == "unnamed road":
             nm = None
-        if not segs or (nm or "") != (last_name or ""):
-            segs.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
+        if not raw or (nm or "") != (last_name or ""):
+            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
             last_name = nm or "Unnamed"
         else:
-            segs[-1]["coords"].append((lat, lon))
-    # Drop leading/trailing 'Unnamed' segments
-    segs = [s for s in segs if s["name"] and s["name"].lower() != "unnamed"]
-    return segs
+            raw[-1]["coords"].append((lat, lon))
 
-def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
+    # Compute lengths and filter tiny segments (likely side roads adjacent to the path)
+    MIN_SEG_LEN = 120.0  # meters
+    MIN_SHARE = 0.06     # keep if covers >=6% of total route even if short
+
+    strict = []
+    for seg in raw:
+        if not seg["name"] or seg["name"].lower() == "unnamed":
+            continue
+        coords = seg.get("coords") or []
+        if len(coords) < 2:
+            continue
+        length = 0.0
+        for i in range(1, len(coords)):
+            length += haversine(coords[i-1], coords[i])
+        share = (length / tot_len) if tot_len > 0 else 0.0
+        if length >= MIN_SEG_LEN or share >= MIN_SHARE:
+            seg["length_m"] = length
+            strict.append(seg)
+
+    # Merge adjacent segments with identical names after filtering
+    merged = []
+    for seg in strict:
+        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
+            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
+        else:
+            merged[-1]["coords"].extend(seg["coords"])
+
+    return mergeddef describe_turns_sentence(route_dict: dict, *, max_segments: int = 10):
     """Build a natural sentence with up/down and left/right joins based on segment bearings and slope."""
     names = []
     segs = onroute_named_segments(route_dict.get("polyline"))
