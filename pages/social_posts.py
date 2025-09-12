@@ -1011,6 +1011,48 @@ lines.append(meeting_line)
 lines.append(time_line)
 lines.append("")
 lines.append("🛣️ This week we’ve got two route options to choose from:")
+def route_blurb(label, r: dict) -> str:
+    name = (r.get("name") or "Route").strip()
+    url = (r.get("url") or r.get("strava") or "").strip()
+    dist = r.get("dist")
+    elev = r.get("elev")
+
+    def _fmt_dist(d):
+        try:
+            return f"{float(d):.1f}"
+        except Exception:
+            return None
+
+    def _fmt_elev(e):
+        try:
+            return str(int(round(float(e))))
+        except Exception:
+            return None
+
+    d_txt = _fmt_dist(dist)
+    e_txt = _fmt_elev(elev)
+
+    tagline = hilliness_blurb(float(dist) if d_txt else None, float(elev) if e_txt else None)
+
+    line1 = f"• {label} – {name}: {url}" if url else f"• {label} – {name}"
+    if d_txt and e_txt:
+        line2 = f"  {d_txt} km with {e_txt}m of elevation – {tagline}"
+    else:
+        line2 = f"  {tagline}"
+
+    # Build turns/roads sentence; fallback to nothing if unavailable
+    sentence = ""
+    try:
+        sentence = describe_turns_sentence(r)
+    except Exception:
+        sentence = ""
+
+    lines = [line1, line2]
+    if sentence:
+        lines.append("  " + sentence)
+
+    return "\n".join(lines)
+
 lines.append(route_blurb(labeled[0][0], labeled[0][1]))
 lines.append(route_blurb(labeled[1][0], labeled[1][1]))
 lines.append("")
