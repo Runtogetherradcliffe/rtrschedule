@@ -850,195 +850,9 @@ def _choose_updown(delta_el):
     if delta_el < -3: return "down"
     return "along"
 
-def onroute_named_segments(polyline: str, *, max_pts: int = 120):
-    """Group sampled polyline points by reverse-geocoded road name; strict filtering by segment length/coverage."""
-    if not polyline:
-        return []
-    key = get_locationiq_key()
-    if not key:
-        return []
-    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
-
-    def haversine(a, b):
-        lat1, lon1 = a; lat2, lon2 = b
-        R = 6371000.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
-        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
-        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
-
-    pts = _sample_points(polyline, max_pts=max_pts)
-    if not pts:
-        return []
-
-    # Total route length approximation
-    tot_len = 0.0
-    for i in range(1, len(pts)):
-        tot_len += haversine(pts[i-1], pts[i])
-
-    raw = []
-    last_name = None
-    for lat, lon in pts:
-        nm = None
-        for z in (18, 17, 16):
-            try:
-                r = requests.get(
-                    f"https://{base}.locationiq.com/v1/reverse",
-                    params={
-                        "key": key, "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
-                        "format": "json", "normalizeaddress": 1, "addressdetails": 1, "zoom": z,
-                    },
-                    timeout=8,
-                )
-                if not r.ok: continue
-                js = r.json() or {}
-                a = js.get("address") or {}
-                for k in ("road","pedestrian","footway","path","cycleway","residential"):
-                    v = a.get(k)
-                    if v:
-                        nm = str(v).strip()
-                        break
-                if nm: break
-            except Exception:
-                continue
-        if not nm or nm.lower() == "unnamed road":
-            nm = None
-        if not raw or (nm or "") != (last_name or ""):
-            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
-            last_name = nm or "Unnamed"
-        else:
-            raw[-1]["coords"].append((lat, lon))
-
-    # Compute lengths and filter tiny segments (likely side roads adjacent to the path)
-    MIN_SEG_LEN = 120.0  # meters
-    MIN_SHARE = 0.06     # keep if covers >=6% of total route even if short
-
-    strict = []
-    for seg in raw:
-        if not seg["name"] or seg["name"].lower() == "unnamed":
-            continue
-        coords = seg.get("coords") or []
-        if len(coords) < 2:
-            continue
-        length = 0.0
-        for i in range(1, len(coords)):
-            length += haversine(coords[i-1], coords[i])
-        share = (length / tot_len) if tot_len > 0 else 0.0
-        if length >= MIN_SEG_LEN or share >= MIN_SHARE:
-            seg["length_m"] = length
-            strict.append(seg)
-
-    # Merge adjacent segments with identical names after filtering
-    merged = []
-    for seg in strict:
-        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
-            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
-        else:
-            merged[-1]["coords"].extend(seg["coords"])
-
-    return merged
-
-def describe_turns_sentence(route_dict: dict, *, max_segments: int = 10):
-    """Build a natural sentence with up/down and left/right joins based on segment bearings and slope."""
-    names = []
-    segs = onroute_named_segments(route_dict.get("polyline"))
-    if not segs:
-        return ""
-    # Try to fetch Strava GPX points with elevation for slope
-    elev_pts = None
-    try:
-        rid = _extract_route_id(route_dict.get("url") or route_dict.get("rid"))
-        tok = get_strava_token()
-        if rid and tok:
-            elev_pts = fetch_strava_route_gpx_points(rid, tok)
-    except Exception:
-        pass
-
-    parts = []
-    path_like = ("path","towpath","trail","canal","promenade","greenway","footpath")
-    # First segment
-    first = segs[0]
-    verb0 = _choose_updown(_segment_slope(first.get("coords"), elev_pts)) if elev_pts else "along"
-    art0 = "the " if any(t in first["name"].lower() for t in path_like) and not first["name"].lower().startswith("the ") else ""
-    parts.append(f"{verb0} {art0}{first['name']}".strip())
-
-    # Subsequent segments
-    for i in range(1, min(len(segs), max_segments)):
-        prev = segs[i-1]; cur = segs[i]
-        # Determine bearings
-        def _seg_bearing(seg):
-            pts = seg.get("coords") or []
-            if len(pts) >= 2:
-                return _bearing(pts[-2], pts[-1])
-            if len(pts) == 1 and prev.get("coords"):
-                return _bearing(prev["coords"][-1], pts[0])
-            return None
-
-        b_prev = _seg_bearing(prev)
-        b_cur  = _seg_bearing(cur)
-        delta = None
-        if b_prev is not None and b_cur is not None:
-            d = (b_cur - b_prev + 540.0) % 360.0 - 180.0
-            delta = d
-        # Choose connector
-        art = "the " if any(t in cur["name"].lower() for t in path_like) and not cur["name"].lower().startswith("the ") else ""
-        if delta is None:
-            connector = "then onto"
-        else:
-            connector = _turn_word(delta)
-        parts.append(f"{connector} {art}{cur['name']}")
-
-    return "We’ll be running " + ", ".join(parts) + "."
 
 
-    # Prefer ordered turn-based road description over highlights
-    sentence = describe_turns_sentence(r)
-    lines = [line1, line2]
-    if sentence:
-        lines.append("  " + sentence)
-    else:
-        # Fallback to old highlights logic
-        highlights = ""
-        if r.get("pois"):
-            parts = []
-            for ch in str(r["pois"]).split("|"):
-                parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
-            if parts:
-                seen=set(); uniq=[]
-                for p in parts:
-                    k=p.lower()
-                    if k not in seen:
-                        seen.add(k); uniq.append(p)
-                highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
-        if highlights:
-            lines.append("  " + highlights)
-    return "\n".join(lines)
 
-    # Prefer ordered road names from the actual route over generic POI highlights
-    roads = onroute_road_names(r.get("polyline"))
-    lines = [line1, line2]
-    if roads:
-        lines.append("  " + roads_sentence(roads))
-    else:
-        # Fallback to POI highlights if roads not available
-        highlights = ""
-        if r.get("pois"):
-            parts = []
-            for ch in str(r["pois"]).split("|"):
-                parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
-            if parts:
-                seen=set(); uniq=[]
-                for p in parts:
-                    k=p.lower()
-                    if k not in seen:
-                        seen.add(k); uniq.append(p)
-                highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
-        if highlights:
-            lines.append("  " + highlights)
-    return "\n".join(lines)
-
-# Order long/short by distance if available
 def sort_with_labels(r1, r2):
     def d(r): return r["dist"] if r["dist"] is not None else -1
     a, b = (r1, r2) if d(r1) >= d(r2) else (r2, r1)
@@ -1053,6 +867,228 @@ lines.append(meeting_line)
 lines.append(time_line)
 lines.append("")
 lines.append("🛣️ This week we’ve got two route options to choose from:")
+
+
+
+
+# === Fast & accurate road segments ===
+_REVERSE_CACHE = {}
+
+def reverse_cache_lookup(lat: float, lon: float, *, zooms=(18,17,16)):
+    k = (round(lat, 5), round(lon, 5))
+    if k in _REVERSE_CACHE:
+        return _REVERSE_CACHE[k]
+    key = get_locationiq_key()
+    if not key:
+        return None
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    for z in zooms:
+        try:
+            r = requests.get(
+                f"https://{base}.locationiq.com/v1/reverse",
+                params={
+                    "key": key, "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+                    "format": "json", "normalizeaddress": 1, "addressdetails": 1, "zoom": z,
+                },
+                timeout=2.5,
+            )
+            if not r.ok:
+                continue
+            js = r.json() or {}
+            a = js.get("address") or {}
+            for kname in ("road","pedestrian","footway","path","cycleway","residential"):
+                v = a.get(kname)
+                if v and str(v).strip().lower() != "unnamed road":
+                    _REVERSE_CACHE[k] = str(v).strip()
+                    return _REVERSE_CACHE[k]
+        except Exception:
+            continue
+    _REVERSE_CACHE[k] = None
+    return None
+
+def locationiq_match_segments(polyline: str | None, *, max_pts: int = 95):
+    """Use LocationIQ Map Matching to get ordered steps (names + geometry) with a single request."""
+    if not polyline:
+        return []
+    key = get_locationiq_key()
+    if not key:
+        return []
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    coords = ";".join([f"{lon:.6f},{lat:.6f}" for (lat, lon) in pts])
+    url = f"https://{base}.locationiq.com/v1/matching/driving/{coords}"
+    try:
+        r = requests.get(url, params={
+            "key": key,
+            "steps": "true",
+            "geometries": "geojson",
+            "overview": "false",
+            "annotations": "false",
+            "alternatives": "false",
+        }, timeout=6)
+        if not r.ok:
+            return []
+        j = r.json() or {}
+        matchings = j.get("matchings") or []
+        if not matchings:
+            return []
+    except Exception:
+        return []
+    segments = []
+    prev_name = None
+    for leg in (matchings[0].get("legs") or []):
+        for step in (leg.get("steps") or []):
+            nm = (step.get("name") or "").strip()
+            if not nm or nm.lower() == "unnamed road":
+                continue
+            coords = []
+            try:
+                for lon, lat in (step.get("geometry", {}).get("coordinates") or []):
+                    coords.append((lat, lon))
+            except Exception:
+                pass
+            if segments and prev_name and nm.lower() == prev_name.lower():
+                segments[-1]["coords"].extend(coords)
+            else:
+                segments.append({"name": nm, "coords": coords})
+            prev_name = nm
+    return segments
+
+def onroute_named_segments(polyline: str, *, max_pts: int = 48):
+    """Strict on-route segments using cached reverse geocoding; preserves first/last even if short."""
+    if not polyline:
+        return []
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    def haversine(a, b):
+        lat1, lon1 = a; lat2, lon2 = b
+        R = 6371000.0
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
+        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
+        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
+    # route length
+    tot_len = 0.0
+    for i in range(1, len(pts)):
+        tot_len += haversine(pts[i-1], pts[i])
+    # Build raw segments with cached reverse lookups
+    raw = []
+    last = None
+    for (lat, lon) in pts:
+        nm = reverse_cache_lookup(lat, lon)
+        if not nm:
+            nm = None
+        if not raw or (nm or "") != (last or ""):
+            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
+            last = nm or "Unnamed"
+        else:
+            raw[-1]["coords"].append((lat, lon))
+    # Filter
+    MIN_SEG_LEN = 100.0
+    MIN_SHARE = 0.05
+    strict = []
+    for idx, seg in enumerate(raw):
+        nm = (seg["name"] or "").strip()
+        if not nm or nm.lower() == "unnamed":
+            continue
+        coords = seg.get("coords") or []
+        if len(coords) < 2:
+            continue
+        length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
+        share = (length/tot_len) if tot_len>0 else 0.0
+        # keep first & last segments even if short; otherwise require thresholds
+        if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
+            strict.append({"name": nm, "coords": coords})
+    # Merge adjacents with same name
+    merged = []
+    for seg in strict:
+        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
+            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
+        else:
+            merged[-1]["coords"].extend(seg["coords"])
+    return merged
+
+def describe_turns_sentence(route_dict: dict, *, max_segments: int = 10):
+    """Prefer fast map-matching steps; fallback to strict cached reverse segments."""
+    segs = locationiq_match_segments(route_dict.get("polyline"))
+    if not segs:
+        segs = onroute_named_segments(route_dict.get("polyline"))
+    if not segs:
+        return ""
+    # Optionally fetch elevation points (if available) for first segment slope
+    elev_pts = None
+    try:
+        rid = _extract_route_id(route_dict.get("url") or route_dict.get("rid"))
+        tok = get_strava_token()
+        if rid and tok:
+            elev_pts = fetch_strava_route_gpx_points(rid, tok)
+    except Exception:
+        pass
+
+    def _bearing(p1, p2):
+        (lat1, lon1), (lat2, lon2) = p1, p2
+        lat1 = math.radians(lat1); lat2 = math.radians(lat2)
+        dlon = math.radians(lon2 - lon1)
+        y = math.sin(dlon) * math.cos(lat2)
+        x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+    def _turn_word(delta_deg):
+        if delta_deg > 50:  return "turn right onto"
+        if delta_deg > 20:  return "bear right onto"
+        if delta_deg < -50: return "turn left onto"
+        if delta_deg < -20: return "bear left onto"
+        return "continue onto"
+
+    def _segment_slope(segment_pts, elev_pts):
+        if not elev_pts or not segment_pts or len(segment_pts) < 2:
+            return 0.0
+        def _nearest_el(lat, lon):
+            best, bestd = None, 1e9
+            for (la, lo, el) in elev_pts:
+                d = (la-lat)*(la-lat)+(lo-lon)*(lo-lon)
+                if d < bestd and el is not None:
+                    bestd, best = d, el
+            return best
+        start_el = _nearest_el(*segment_pts[0])
+        end_el   = _nearest_el(*segment_pts[-1])
+        if start_el is None or end_el is None:
+            return 0.0
+        return float(end_el - start_el)
+
+    path_like = ("path","towpath","trail","canal","promenade","greenway","footpath")
+    parts = []
+    # First segment
+    first = segs[0]
+    delta_el = _segment_slope(first.get("coords"), elev_pts) if elev_pts else 0.0
+    verb0 = "up" if delta_el > 3 else ("down" if delta_el < -3 else "along")
+    art0 = "the " if any(t in first["name"].lower() for t in path_like) and not first["name"].lower().startswith("the ") else ""
+    parts.append(f"{verb0} {art0}{first['name']}".strip())
+
+    # Subsequent segments (limit to max_segments)
+    for i in range(1, min(len(segs), max_segments)):
+        prev = segs[i-1]; cur = segs[i]
+        def _seg_bearing(seg):
+            pts = seg.get("coords") or []
+            if len(pts) >= 2:
+                return _bearing(pts[-2], pts[-1])
+            return None
+        b_prev = _seg_bearing(prev)
+        b_cur  = _seg_bearing(cur)
+        if b_prev is None or b_cur is None:
+            connector = "then onto"
+        else:
+            d = (b_cur - b_prev + 540.0) % 360.0 - 180.0
+            connector = _turn_word(d)
+        art = "the " if any(t in cur["name"].lower() for t in path_like) and not cur["name"].lower().startswith("the ") else ""
+        parts.append(f"{connector} {art}{cur['name']}")
+
+    return "We’ll be running " + ", ".join(parts) + "."
+
 def route_blurb(label, r: dict) -> str:
     name = (r.get("name") or "Route").strip()
     url = (r.get("url") or r.get("strava") or "").strip()
