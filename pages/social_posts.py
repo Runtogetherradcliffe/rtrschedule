@@ -591,11 +591,13 @@ def csv_url_candidates(url: str, sheet_name: str = "Schedule"):
     return uniq
 
 # Build candidates and try each
+
 try:
-    df = load_schedule(sheet_url=sheet_url, sheet_name=get_cfg("SHEET_NAME", "Schedule"))
+    df = _load_schedule_robust(sheet_url, get_cfg("SHEET_NAME", "Schedule"))
 except Exception as e:
     st.error(f"Couldn't read the Google Sheet. {e}")
     st.stop()
+
 # Column mapping (as per your master sheet)
 date_col = "Date (Thu)"
 r_names = ["Route 1 - Name", "Route 2 - Name"]
