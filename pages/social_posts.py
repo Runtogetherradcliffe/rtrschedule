@@ -641,7 +641,7 @@ notes_col = "Notes"
 meet_loc_col = None  # not in sheet; parsed from Notes
 
 # --- Parse dates as pure date ---
-d = pd.to_datetime(sched[date_col], errors="coerce", format="%Y-%m-%d %H:%M:%S")
+d = pd.to_datetime(df[date_col], errors="coerce", format="%Y-%m-%d %H:%M:%S")
 sched["_dateonly"] = d.dt.date
 today = pd.Timestamp.today().date()
 future_rows = sched[sched["_dateonly"] >= today]
