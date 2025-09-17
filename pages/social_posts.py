@@ -11,6 +11,14 @@ from datetime import datetime
 
 
 
+
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
+def cached_onroute_segments(polyline: str, max_pts: int = 240):
+    try:
+        return onroute_named_segments(polyline, max_pts=max_pts)
+    except Exception:
+        return []
+
 # --- Elevation-assisted phrasing (up/down) ---
 import requests
 from math import radians, sin, cos, atan2, sqrt
@@ -59,10 +67,13 @@ def _segment_grade(seg_coords: list[tuple], elev_map: dict) -> float:
     run = max(_hv_dist(a,b), 1.0)
     return (e2 - e1) / run
 
-def _apply_updown(sentence: str, segs: list[dict], grade_by_index: list[float], thr: float = 0.012) -> str:
+def _apply_updown(sentence: str, segs: list[dict], grade_by_index: list[float], thr: float = 0.012, outback_names: set[str] | None = None) -> str:
     """Replace 'along/onto {name}' with 'up/down' where grade magnitude exceeds threshold. One-pass, ordered replacements."""
     s = sentence
     for idx, seg in enumerate(segs):
+        if outback_names and (seg.get('name') or '').strip().lower() in outback_names:
+            # Neutral phrasing for out-and-back roads
+            continue
         nm = (seg.get("name") or "").strip()
         if not nm: 
             continue
@@ -768,6 +779,16 @@ routes = [build_route_dict(0), build_route_dict(1)]
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
+# Warm caches fairly for both routes: reverse lookup (already interleaved), segments, and sentences
+try:
+    for _r in routes:
+        pl = _r.get("polyline") or ""
+        _ = cached_onroute_segments(pl, max_pts=220)
+        _ = cached_sentence_for_route(_r, max_segments=26)
+except Exception:
+    pass
+
+
 # Pre-fetch reverse geocodes for both routes (interleaved) to distribute API calls fairly
 try:
     _ = _prefetch_reverse_for_routes(routes, max_pts_each=200)
@@ -1231,6 +1252,83 @@ def route_blurb(label, r: dict) -> str:
     lines = [line1, line2]
     sentence = cached_sentence_for_route(r, max_segments=26)
 
+    # Out-and-back neutralisation (keep neutral wording on repeated streets)
+    try:
+        segs = cached_onroute_segments(r.get("polyline") or "", max_pts=220)
+        name_counts = {}
+        for seg in segs:
+            nm = (seg.get("name") or "").strip()
+            if not nm: 
+                continue
+            k = nm.lower()
+            name_counts[k] = name_counts.get(k, 0) + 1
+        outback_names = {k for k,v in name_counts.items() if v >= 2}
+        # If elevation up/down logic exists, pass outback set to keep those neutral
+        try:
+            sentence  # keep mypy happy
+            _ = _apply_updown  # type: ignore
+            # Build minimal grade list if helpers exist
+            edge_pts = []
+            for seg in segs:
+                coords = seg.get("coords") or []
+                if coords:
+                    edge_pts.extend([coords[0], coords[-1]])
+            # Deduplicate while keeping order
+            seen = set(); uniq = []
+            for p in edge_pts:
+                if p not in seen:
+                    uniq.append(p); seen.add(p)
+            try:
+                elevs = _elevations_for_points(uniq)  # type: ignore
+            except Exception:
+                elevs = None
+            if elevs:
+                e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
+                grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]  # type: ignore
+                sentence = _apply_updown(sentence, segs, grades, thr=0.010, outback_names=outback_names)  # type: ignore
+        except Exception:
+            # No elevation logic: still neutralise by leaving wording unchanged for repeated names
+            pass
+    except Exception:
+        pass
+
+
+    # Elevation-aware phrasing (up/down) with out-and-back neutralisation
+    try:
+        segs = cached_onroute_segments(r.get("polyline") or "", max_pts=220)
+        # out-and-back detection: any street name appearing 2+ times
+        name_counts = {}
+        ordered_names = []
+        for seg in segs:
+            nm = (seg.get("name") or "").strip()
+            if not nm: 
+                continue
+            ordered_names.append(nm)
+            k = nm.lower()
+            name_counts[k] = name_counts.get(k, 0) + 1
+        outback_names = {k for k,v in name_counts.items() if v >= 2}
+        # Collect unique endpoints for elevation calls
+        edge_pts = []
+        for seg in segs:
+            coords = seg.get("coords") or []
+            if not coords: 
+                continue
+            a = coords[0]; b = coords[-1]
+            edge_pts.extend([a,b])
+        seen = set(); uniq = []
+        for p in edge_pts:
+            if p not in seen:
+                uniq.append(p); seen.add(p)
+        try:
+            elevs = _elevations_for_points(uniq)  # cached
+        except NameError:
+            elevs = None
+        if elevs:
+            e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
+            grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]
+            sentence = _apply_updown(sentence, segs, grades, thr=0.010, outback_names=outback_names)
+    except Exception:
+        pass
     # Elevation-aware phrasing (up/down) — light touch
     try:
         segs = onroute_named_segments(r.get("polyline") or "", max_pts=200)
