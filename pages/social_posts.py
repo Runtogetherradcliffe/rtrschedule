@@ -929,6 +929,19 @@ def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
 
     return "We’ll be running " + ", ".join(parts) + "."
 
+
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
+def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None) -> str:
+    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
+    try:
+        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
+        return describe_turns_sentence(rd)
+    except Exception:
+        return ""
+
+def cached_sentence_for_route(r: dict) -> str:
+    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
+
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
@@ -956,7 +969,7 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = describe_turns_sentence(r)
+    sentence = cached_sentence_for_route(r)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
@@ -966,6 +979,15 @@ def sort_with_labels(r1, r2):
     def d(r): return r["dist"] if r["dist"] is not None else -1
     a, b = (r1, r2) if d(r1) >= d(r2) else (r2, r1)
     return [("8k", a), ("5k", b)]
+
+
+# Auto-preload directions cache for these routes so rendering is fast.
+with st.spinner("Preparing directions…"):
+    try:
+        for _r in routes:
+            _ = cached_sentence_for_route(_r)
+    except Exception:
+        pass
 
 labeled = sort_with_labels(routes[0], routes[1])
 
