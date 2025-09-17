@@ -34,12 +34,6 @@ import random
 import urllib.parse
 from datetime import datetime
 
-
-try:
-    from app_config import get_cfg
-except Exception:
-    def get_cfg(key, default=None):
-        return default
 # ---- Caching & Preload helpers ----
 
 
