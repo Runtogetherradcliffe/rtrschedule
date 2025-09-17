@@ -7,6 +7,31 @@ import random
 import urllib.parse
 from datetime import datetime
 
+# ---- Caching & Preload helpers ----
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
+def cached_turns_sentence(polyline: str | None, url_or_rid: str | None) -> str:
+    """Cache the computed directions for a route (by polyline and URL/ID) for 7 days."""
+    route_dict = {"polyline": polyline, "url": url_or_rid, "rid": _extract_route_id(url_or_rid or "")}
+    try:
+        return describe_turns_sentence(route_dict)
+    except Exception:
+        return ""
+
+def preload_directions_for_routes(route_list):
+    """Warm the cache for a list of route dicts (concurrently). Returns number of items warmed."""
+    warmed = 0
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(cached_turns_sentence, r.get("polyline"), r.get("url") or r.get("rid")) for r in route_list]
+            for _ in as_completed(futs):
+                warmed += 1
+    except Exception:
+        for r in route_list:
+            _ = cached_turns_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
+            warmed += 1
+    return warmed
+
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
@@ -942,32 +967,7 @@ def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
 
 # ---- Caching & Preload helpers ----
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
-def cached_turns_sentence(polyline: str | None, url_or_rid: str | None) -> str:
-    """Cache the computed directions for a route (by polyline and URL/ID) for 7 days."""
-    route_dict = {"polyline": polyline, "url": url_or_rid, "rid": _extract_route_id(url_or_rid or "")}
-    try:
-        return describe_turns_sentence(route_dict)
-    except Exception:
-        return ""
 
-def preload_directions_for_routes(route_list: list[dict]) -> int:
-    """Warm the cache for a list of route dicts (concurrently). Returns number of items warmed."""
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-    except Exception:
-        # Fallback to sequential if concurrency not available
-        warmed = 0
-        for r in route_list:
-            _ = cached_turns_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
-            warmed += 1
-        return warmed
-
-    warmed = 0
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(cached_turns_sentence, r.get("polyline"), r.get("url") or r.get("rid")) for r in route_list]
-        for _ in as_completed(futs):
-            warmed += 1
-    return warmed
 
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
