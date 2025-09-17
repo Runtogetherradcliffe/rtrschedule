@@ -35,31 +35,30 @@ import urllib.parse
 from datetime import datetime
 
 
-from sheets import load_schedule
 
-def _load_schedule_robust(sheet_url: str | None, sheet_name: str | None):
-    """
-    Try several signatures of sheets.load_schedule to match the actual implementation.
-    """
-    try:
-        return load_schedule(sheet_url=sheet_url, sheet_name=sheet_name)
-    except TypeError:
-        pass
-    try:
-        return load_schedule(sheet_name=sheet_name)
-    except TypeError:
-        pass
-    try:
-        if sheet_url and sheet_name:
-            return load_schedule(sheet_url, sheet_name)
-    except TypeError:
-        pass
-    try:
-        if sheet_url:
-            return load_schedule(sheet_url)
-    except TypeError:
-        pass
-    return load_schedule()
+def extract_sheet_id(url: str):
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", str(url or ""))
+    return m.group(1) if m else None
+
+def load_google_sheet_csv(sheet_id: str, sheet_name: str):
+    u = (
+        f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        "/gviz/tq?tqx=out:csv&sheet=" + urllib.parse.quote(sheet_name, safe="")
+    )
+    df = pd.read_csv(u, dtype=str, keep_default_na=False)
+    # Drop mis-exported first unnamed index column if present
+    if len(df.columns) and str(df.columns[0]).lower().startswith("unnamed"):
+        df = df.drop(columns=[df.columns[0]])
+    return df
+
+def load_from_google_csv(url: str):
+    sid = extract_sheet_id(url)
+    dfs = {}
+    if sid:
+        df = load_google_sheet_csv(sid, "Schedule")
+        if not df.empty:
+            dfs["Schedule"] = df
+    return dfs
 
 try:
     from app_config import get_cfg
