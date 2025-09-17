@@ -645,6 +645,20 @@ routes = [build_route_dict(0), build_route_dict(1)]
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
+# Determine if tonight is a Road run (from row/routing terrain)
+try:
+    is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
+    if not is_road:
+        # Fallback: inspect the sheet row for any 'terrain'/'type' columns
+        for k in row.index:
+            v = str(row.get(k, "")).lower()
+            if "road" in v and ("terrain" in k.lower() or "type" in k.lower() or "season" in k.lower()):
+                is_road = True
+                break
+except Exception:
+    is_road = False
+
+
 poi_debug = []
 try:
     m = st.session_state.get("poi_debug_map", {})
