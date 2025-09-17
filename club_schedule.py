@@ -56,7 +56,7 @@ mode = st.radio("Load data from:", ["Google Sheet (CSV export — recommended)",
 
 dfs = {}
 if mode.startswith("Google"):
-    url = st.text_input("Google Sheet URL", value="https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing", disabled=True)
+    url = st.text_input("Google Sheet URL")
     if url:
         sid = extract_sheet_id(url)
         if sid:
