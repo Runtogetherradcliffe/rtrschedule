@@ -1,3 +1,4 @@
+import streamlit as st
 
 # pages/social_posts.py
 # Build: v2025.09.01-SOCIAL-24 (rebuild: robust date-only + Strava/LocationIQ enrichment)
@@ -109,8 +110,6 @@ def _prefetch_reverse_for_routes(routes: list[dict], max_pts_each: int = 180) ->
         return calls
     except Exception:
         return 0
-
-import streamlit as st
 # --- Cached directions helpers (single source of truth) ---
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 26) -> str:
