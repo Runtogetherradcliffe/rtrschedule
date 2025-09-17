@@ -36,6 +36,31 @@ from datetime import datetime
 
 
 from sheets import load_schedule
+
+def _load_schedule_robust(sheet_url: str | None, sheet_name: str | None):
+    """
+    Try several signatures of sheets.load_schedule to match the actual implementation.
+    """
+    try:
+        return load_schedule(sheet_url=sheet_url, sheet_name=sheet_name)
+    except TypeError:
+        pass
+    try:
+        return load_schedule(sheet_name=sheet_name)
+    except TypeError:
+        pass
+    try:
+        if sheet_url and sheet_name:
+            return load_schedule(sheet_url, sheet_name)
+    except TypeError:
+        pass
+    try:
+        if sheet_url:
+            return load_schedule(sheet_url)
+    except TypeError:
+        pass
+    return load_schedule()
+
 try:
     from app_config import get_cfg
 except Exception:
