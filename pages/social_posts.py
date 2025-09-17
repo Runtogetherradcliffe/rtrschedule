@@ -1,7 +1,14 @@
-import streamlit as st
 
-# ---- Caching & Preload helpers (require Streamlit) ----
-@st.cache_data(ttl=7*24*3600)
+# pages/social_posts.py
+# Build: v2025.09.01-SOCIAL-24 (rebuild: robust date-only + Strava/LocationIQ enrichment)
+
+import re
+import random
+import urllib.parse
+from datetime import datetime
+
+# ---- Caching & Preload helpers ----
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
 def cached_turns_sentence(polyline: str | None, url_or_rid: str | None) -> str:
     """Cache the computed directions for a route (by polyline and URL/ID) for 7 days."""
     route_dict = {"polyline": polyline, "url": url_or_rid, "rid": _extract_route_id(url_or_rid or "")}
@@ -25,17 +32,25 @@ def preload_directions_for_routes(route_list):
             warmed += 1
     return warmed
 
+SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
+import pandas as pd
+import requests
+import os
+import hashlib
+import streamlit as st
 
-# pages/social_posts.py
-# Build: v2025.09.01-SOCIAL-24 (rebuild: robust date-only + Strava/LocationIQ enrichment)
+# Debug container to avoid NameError even if later code fails to set it
+poi_debug: list = []
+from typing import List, Dict
 
-import re
-import random
-import urllib.parse
-from datetime import datetime
-
-# ---- Caching & Preload helpers ----
-
+# ----------------------------
+# Config / helpers
+# ----------------------------
+def get_cfg(key, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
 
 def clean(s):
     return (str(s).strip()) if s is not None else ""
@@ -951,6 +966,7 @@ def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
 
 
 # ---- Caching & Preload helpers ----
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
 
 
 def route_blurb(label, r: dict) -> str:
