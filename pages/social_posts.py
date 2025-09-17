@@ -8,6 +8,7 @@ import urllib.parse
 from datetime import datetime
 
 
+import streamlit as st
 # --- Cached directions helpers (single source of truth) ---
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
 def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 22) -> str:
@@ -32,7 +33,6 @@ import pandas as pd
 import requests
 import os
 import hashlib
-import streamlit as st
 
 # Debug container to avoid NameError even if later code fails to set it
 poi_debug: list = []
