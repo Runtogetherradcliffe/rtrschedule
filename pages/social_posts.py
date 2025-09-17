@@ -943,8 +943,7 @@ def route_blurb(label, r: dict) -> str:
     sentence = describe_turns_sentence(r)
     if sentence:
         lines.append("  " + sentence)
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 # Order long/short by distance if available
 def sort_with_labels(r1, r2):
