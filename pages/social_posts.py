@@ -617,7 +617,10 @@ def csv_url_candidates(url: str, sheet_name: str = "Schedule"):
 # Build candidates and try each
 
 try:
-    df = _load_schedule_robust(sheet_url, get_cfg("SHEET_NAME", "Schedule"))
+    dfs = load_from_google_csv(sheet_url)
+    if "Schedule" not in dfs or dfs["Schedule"].empty:
+        raise RuntimeError("No 'Schedule' tab returned")
+    df = dfs["Schedule"]
 except Exception as e:
     st.error(f"Couldn't read the Google Sheet. {e}")
     st.stop()
