@@ -1,3 +1,30 @@
+import streamlit as st
+
+# ---- Caching & Preload helpers (require Streamlit) ----
+@st.cache_data(ttl=7*24*3600)
+def cached_turns_sentence(polyline: str | None, url_or_rid: str | None) -> str:
+    """Cache the computed directions for a route (by polyline and URL/ID) for 7 days."""
+    route_dict = {"polyline": polyline, "url": url_or_rid, "rid": _extract_route_id(url_or_rid or "")}
+    try:
+        return describe_turns_sentence(route_dict)
+    except Exception:
+        return ""
+
+def preload_directions_for_routes(route_list):
+    """Warm the cache for a list of route dicts (concurrently). Returns number of items warmed."""
+    warmed = 0
+    try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futs = [ex.submit(cached_turns_sentence, r.get("polyline"), r.get("url") or r.get("rid")) for r in route_list]
+            for _ in as_completed(futs):
+                warmed += 1
+    except Exception:
+        for r in route_list:
+            _ = cached_turns_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
+            warmed += 1
+    return warmed
+
 
 # pages/social_posts.py
 # Build: v2025.09.01-SOCIAL-24 (rebuild: robust date-only + Strava/LocationIQ enrichment)
@@ -6,24 +33,15 @@ import re
 import random
 import urllib.parse
 from datetime import datetime
-import pandas as pd
-import requests
-import os
-import hashlib
-import streamlit as st
 
-# Debug container to avoid NameError even if later code fails to set it
-poi_debug: list = []
-from typing import List, Dict
 
-# ----------------------------
-# Config / helpers
-# ----------------------------
-def get_cfg(key, default=None):
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
+try:
+    from app_config import get_cfg
+except Exception:
+    def get_cfg(key, default=None):
         return default
+# ---- Caching & Preload helpers ----
+
 
 def clean(s):
     return (str(s).strip()) if s is not None else ""
@@ -524,7 +542,7 @@ def enrich_route_dict(r: dict) -> dict:
 st.title("Weekly Social Post Composer")
 st.caption("Build: v2025.09.01-SOCIAL-24 — date-only parsing, Strava/LocationIQ enrichment")
 
-sheet_url = st.text_input("Google Sheet URL", value=get_cfg("SHEET_CSV_URL", get_cfg("SHEET_URL","")))
+sheet_url = st.text_input("Google Sheet URL", value="https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing", disabled=True)
 if not sheet_url:
     st.info("Paste your Google Sheet (the master schedule).")
     st.stop()
@@ -586,12 +604,6 @@ if sched is None:
     st.stop()
 
 
-# Make both names available for downstream code
-try:
-    df = sched
-except NameError:
-    df = None
-
 # Column mapping (as per your master sheet)
 date_col = "Date (Thu)"
 r_names = ["Route 1 - Name", "Route 2 - Name"]
@@ -650,6 +662,30 @@ routes = [build_route_dict(0), build_route_dict(1)]
 
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
+
+
+# Optional: preload directions cache for these routes
+with st.expander("⚡ Preload directions (faster generation)", expanded=False):
+    if st.button("Preload now", use_container_width=True):
+        with st.spinner("Preloading directions…"):
+            warmed = preload_directions_for_routes(routes)
+        st.success(f"Preloaded directions for {warmed} route(s).")
+
+
+
+# Determine if tonight is a Road run (from row/routing terrain)
+try:
+    is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
+    if not is_road:
+        # Fallback: inspect the sheet row for any 'terrain'/'type' columns
+        for k in row.index:
+            v = str(row.get(k, "")).lower()
+            if "road" in v and ("terrain" in k.lower() or "type" in k.lower() or "season" in k.lower()):
+                is_road = True
+                break
+except Exception:
+    is_road = False
+
 
 poi_debug = []
 try:
@@ -714,6 +750,215 @@ date_str = format_day_month_uk(pd.to_datetime(row["_dateonly"]))
 time_line = "🕖 We set off at 7:00pm"
 meeting_line = f"📍 Meeting at: {meet_loc.title()}"
 
+def locationiq_match_steps(polyline: str | None, *, max_pts: int = 120):
+    """Map-matching steps (maneuvers) via LocationIQ; tries foot→cycling→driving."""
+    if not polyline:
+        return []
+    key = get_locationiq_key()
+    if not key:
+        return []
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    coords = ";".join([f"{lon:.6f},{lat:.6f}" for (lat, lon) in pts])
+    profiles = ["foot", "cycling", "driving"]
+    for prof in profiles:
+        url = f"https://{base}.locationiq.com/v1/matching/{prof}/{coords}"
+        try:
+            r = requests.get(url, params={
+                "key": key,
+                "steps": "true",
+                "geometries": "geojson",
+                "overview": "false",
+                "annotations": "false",
+                "alternatives": "false",
+            }, timeout=8)
+            if not r.ok:
+                continue
+            j = r.json() or {}
+            matchings = j.get("matchings") or []
+            if not matchings:
+                continue
+            steps_out = []
+            prev_name = None
+            for leg in (matchings[0].get("legs") or []):
+                for step in (leg.get("steps") or []):
+                    nm = (step.get("name") or "").strip()
+                    if not nm or nm.lower() == "unnamed road":
+                        continue
+                    coords = []
+                    try:
+                        for lon, lat in (step.get("geometry", {}).get("coordinates") or []):
+                            coords.append((lat, lon))
+                    except Exception:
+                        pass
+                    man = step.get("maneuver") or {}
+                    if steps_out and prev_name and nm.lower() == prev_name.lower():
+                        steps_out[-1]["coords"].extend(coords)
+                    else:
+                        steps_out.append({"name": nm, "coords": coords, "maneuver": man})
+                    prev_name = nm
+            if steps_out:
+                return steps_out
+        except Exception:
+            continue
+    return []
+
+_REVERSE_CACHE = {}
+def reverse_cache_lookup(lat: float, lon: float, *, zooms=(18,17,16)):
+    k = (round(lat, 5), round(lon, 5))
+    if k in _REVERSE_CACHE:
+        return _REVERSE_CACHE[k]
+    key = get_locationiq_key()
+    if not key:
+        return None
+    base = _get_secret("LOCATIONIQ_BASE", "us1") or "us1"
+    for z in zooms:
+        try:
+            r = requests.get(
+                f"https://{base}.locationiq.com/v1/reverse",
+                params={
+                    "key": key, "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+                    "format": "json", "normalizeaddress": 1, "addressdetails": 1, "zoom": z,
+                },
+                timeout=2.5,
+            )
+            if not r.ok:
+                continue
+            js = r.json() or {}
+            a = js.get("address") or {}
+            for kname in ("road","pedestrian","footway","path","cycleway","residential"):
+                v = a.get(kname)
+                if v and str(v).strip().lower() != "unnamed road":
+                    _REVERSE_CACHE[k] = str(v).strip()
+                    return _REVERSE_CACHE[k]
+        except Exception:
+            continue
+    _REVERSE_CACHE[k] = None
+    return None
+
+def onroute_named_segments(polyline: str, *, max_pts: int = 72):
+    """On-route segments using cached reverse geocoding; keep more steps for clearer directions."""
+    if not polyline:
+        return []
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    def haversine(a, b):
+        lat1, lon1 = a; lat2, lon2 = b
+        R = 6371000.0
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
+        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
+        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
+    tot_len = sum(haversine(pts[i-1], pts[i]) for i in range(1, len(pts)))
+    raw = []
+    last = None
+    for (lat, lon) in pts:
+        nm = reverse_cache_lookup(lat, lon) or None
+        if not raw or (nm or "") != (last or ""):
+            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
+            last = nm or "Unnamed"
+        else:
+            raw[-1]["coords"].append((lat, lon))
+    MIN_SEG_LEN = 40.0
+    MIN_SHARE = 0.015
+    strict = []
+    for idx, seg in enumerate(raw):
+        nm = (seg["name"] or "").strip()
+        if not nm or nm.lower() == "unnamed":
+            continue
+        coords = seg.get("coords") or []
+        if len(coords) < 2:
+            continue
+        length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
+        share = (length/tot_len) if tot_len>0 else 0.0
+        if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
+            strict.append({"name": nm, "coords": coords})
+    merged = []
+    for seg in strict:
+        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
+            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
+        else:
+            merged[-1]["coords"].extend(seg["coords"])
+    return merged
+
+def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
+    """Prefer map-matching steps (maneuvers) for Maps-like directions; fallback to on-route segments."""
+    steps = locationiq_match_steps(route_dict.get("polyline"))
+    segs = steps if steps else onroute_named_segments(route_dict.get("polyline"))
+    if not segs:
+        return ""
+
+    # Optional elevation slope for first segment (if GPX available)
+    elev_pts = None
+    try:
+        rid = _extract_route_id(route_dict.get("url") or route_dict.get("rid"))
+        tok = get_strava_token()
+        if rid and tok:
+            elev_pts = fetch_strava_route_gpx_points(rid, tok)
+    except Exception:
+        pass
+
+    def _turn_from_modifier(man):
+        mod = (man or {}).get("modifier")
+        if not mod:
+            return "continue onto"
+        m = str(mod).lower()
+        if "uturn" in m: return "make a U-turn onto"
+        if "slight" in m and "right" in m: return "bear right onto"
+        if "slight" in m and "left"  in m: return "bear left onto"
+        if m == "right": return "turn right onto"
+        if m == "left":  return "turn left onto"
+        if "straight" in m: return "continue onto"
+        return "continue onto"
+
+    def _nearest_el(lat, lon):
+        if not elev_pts: return None
+        best, bestd = None, 1e9
+        for (la, lo, el) in elev_pts:
+            d = (la-lat)*(la-lat)+(lo-lon)*(lo-lon)
+            if d < bestd and el is not None:
+                bestd, best = d, el
+        return best
+
+    def _segment_slope(coords):
+        if not coords or len(coords) < 2 or not elev_pts:
+            return 0.0
+        s = _nearest_el(*coords[0]); e = _nearest_el(*coords[-1])
+        if s is None or e is None: return 0.0
+        return float(e - s)
+
+    path_like = ("path","towpath","trail","canal","promenade","greenway","footpath")
+
+    parts = []
+    # First segment
+    first = segs[0]
+    delta_el = _segment_slope(first.get("coords"))
+    verb0 = "up" if delta_el > 3 else ("down" if delta_el < -3 else "along")
+    name0 = first["name"]
+    art0 = "the " if any(t in name0.lower() for t in path_like) and not name0.lower().startswith("the ") else ""
+    parts.append(f"{verb0} {art0}{name0}".strip())
+
+    # Subsequent segments
+    for i in range(1, min(len(segs), max_segments)):
+        cur = segs[i]
+        nm = cur["name"]
+        art = "the " if any(t in nm.lower() for t in path_like) and not nm.lower().startswith("the ") else ""
+        if "maneuver" in cur:
+            connector = _turn_from_modifier(cur.get("maneuver"))
+        else:
+            connector = "then onto"
+        parts.append(f"{connector} {art}{nm}")
+
+    return "We’ll be running " + ", ".join(parts) + "."
+
+
+# ---- Caching & Preload helpers ----
+
+
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
@@ -741,7 +986,9 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    if highlights: lines.append("  " + highlights)
+    sentence = describe_turns_sentence(r)
+    if sentence:
+        lines.append("  " + sentence)
     return "\n".join(lines)
 
 # Order long/short by distance if available
@@ -762,6 +1009,10 @@ lines.append("🛣️ This week we’ve got two route options to choose from:")
 lines.append(route_blurb(labeled[0][0], labeled[0][1]))
 lines.append(route_blurb(labeled[1][0], labeled[1][1]))
 lines.append("")
+if is_road:
+    lines.append(SAFETY_NOTE)
+    lines.append("")
+
 lines.append("📲 Book now:")
 lines.append("https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
 lines.append("❌ Can’t make it? Cancel at least 1 hour before:")
