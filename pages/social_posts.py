@@ -942,6 +942,19 @@ def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None) ->
 def cached_sentence_for_route(r: dict) -> str:
     return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
 
+
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
+def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 22) -> str:
+    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
+    try:
+        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
+        return describe_turns_sentence(rd, max_segments=max_segments)
+    except Exception:
+        return ""
+
+def cached_sentence_for_route(r: dict, max_segments: int = 22) -> str:
+    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
+
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
