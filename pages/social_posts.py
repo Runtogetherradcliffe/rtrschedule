@@ -36,6 +36,7 @@ from datetime import datetime
 
 
 
+import pandas as pd
 def extract_sheet_id(url: str):
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", str(url or ""))
     return m.group(1) if m else None
