@@ -6,7 +6,7 @@ import streamlit as st
 
 # Known keys and sensible defaults
 DEFAULTS = {
-    "GS_URL_DEFAULT": "https://docs.google.com/spreadsheets/d/1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw/edit?usp=sharing",
+    "GS_URL_DEFAULT": "",
     "MEET_LOC_DEFAULT": "Radcliffe Market",
     "MEET_TIME_DEFAULT": "19:00",
     "BOOK_URL": "https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs",
