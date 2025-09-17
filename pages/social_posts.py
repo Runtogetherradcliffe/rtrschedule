@@ -837,8 +837,8 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             last = nm or "Unnamed"
         else:
             raw[-1]["coords"].append((lat, lon))
-    MIN_SEG_LEN = 40.0
-    MIN_SHARE = 0.015
+    MIN_SEG_LEN = 25.0
+    MIN_SHARE = 0.008
     strict = []
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
@@ -969,7 +969,7 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = cached_sentence_for_route(r)
+    sentence = cached_sentence_for_route(r, max_segments=22)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
