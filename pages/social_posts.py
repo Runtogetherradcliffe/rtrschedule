@@ -1078,6 +1078,8 @@ def route_blurb(label, r: dict) -> str:
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
     sentence = cached_sentence_for_route(r, max_segments=26)
+    if not sentence:
+        sentence = cached_sentence_for_route(r, max_segments=26)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
