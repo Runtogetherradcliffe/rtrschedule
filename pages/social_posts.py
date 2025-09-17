@@ -8,6 +8,37 @@ import urllib.parse
 from datetime import datetime
 
 
+
+# --- Fair, interleaved reverse-geocode prefetch to avoid starving the 2nd route ---
+def _prefetch_reverse_for_routes(routes: list[dict], max_pts_each: int = 180) -> int:
+    try:
+        # Build per-route sampled points
+        samples = []
+        for r in routes:
+            pl = r.get("polyline")
+            pts = _sample_points(pl, max_pts=max_pts_each) if pl else []
+            samples.append(pts)
+        # Interleave calls: round-robin through the lists
+        calls = 0
+        idx = 0
+        more = True
+        while more:
+            more = False
+            for pts in samples:
+                if idx < len(pts):
+                    lat, lon = pts[idx]
+                    try:
+                        # Reverse lookup is usually cached; this will be a no-op if already fetched
+                        _ = reverse_cache_lookup(lat, lon)
+                        calls += 1
+                    except Exception:
+                        pass
+                    more = True
+            idx += 1
+        return calls
+    except Exception:
+        return 0
+
 import streamlit as st
 # --- Cached directions helpers (single source of truth) ---
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
@@ -667,6 +698,14 @@ routes = [build_route_dict(0), build_route_dict(1)]
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
+# Pre-fetch reverse geocodes for both routes (interleaved) to distribute API calls fairly
+try:
+    _ = _prefetch_reverse_for_routes(routes, max_pts_each=200)
+except Exception:
+    pass
+
+
+
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
     is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
@@ -1078,8 +1117,6 @@ def route_blurb(label, r: dict) -> str:
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
     sentence = cached_sentence_for_route(r, max_segments=26)
-    if not sentence:
-        sentence = cached_sentence_for_route(r, max_segments=26)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
