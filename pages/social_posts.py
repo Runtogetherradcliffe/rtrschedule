@@ -9,6 +9,77 @@ from datetime import datetime
 
 
 
+
+# --- Elevation-assisted phrasing (up/down) ---
+import requests
+from math import radians, sin, cos, atan2, sqrt
+
+def _hv_dist(a, b):
+    # meters
+    lat1, lon1 = a; lat2, lon2 = b
+    R = 6371000.0
+    dlat = radians(lat2 - lat1); dlon = radians(lon2 - lon1)
+    sa = sin(dlat/2.0); sb = sin(dlon/2.0)
+    aa = sa*sa + cos(radians(lat1))*cos(radians(lat2))*sb*sb
+    return 2*R*atan2(sqrt(aa), sqrt(1-aa))
+
+@st.cache_data(ttl=14*24*3600, show_spinner=False)
+def _elevations_for_points(points: list[tuple]) -> list | None:
+    """Fetch elevations (meters) for a list of (lat,lon) using open-elevation; returns list aligned to input or None on failure."""
+    if not points:
+        return []
+    try:
+        # Batch up to ~90 per request
+        elevs = []
+        batch = 90
+        for i in range(0, len(points), batch):
+            chunk = points[i:i+batch]
+            locs = "|".join(f"{lat:.6f},{lon:.6f}" for (lat,lon) in chunk)
+            url = f"https://api.open-elevation.com/api/v1/lookup?locations={locs}"
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                return None
+            data = resp.json().get("results", [])
+            if len(data) != len(chunk):
+                return None
+            elevs.extend([r.get("elevation") for r in data])
+        return elevs
+    except Exception:
+        return None
+
+def _segment_grade(seg_coords: list[tuple], elev_map: dict) -> float:
+    """Return average grade (rise/run) for a segment using first/last points; positive = uphill."""
+    if not seg_coords:
+        return 0.0
+    a = seg_coords[0]; b = seg_coords[-1]
+    e1 = elev_map.get(a); e2 = elev_map.get(b)
+    if e1 is None or e2 is None:
+        return 0.0
+    run = max(_hv_dist(a,b), 1.0)
+    return (e2 - e1) / run
+
+def _apply_updown(sentence: str, segs: list[dict], grade_by_index: list[float], thr: float = 0.012) -> str:
+    """Replace 'along/onto {name}' with 'up/down' where grade magnitude exceeds threshold. One-pass, ordered replacements."""
+    s = sentence
+    for idx, seg in enumerate(segs):
+        nm = (seg.get("name") or "").strip()
+        if not nm: 
+            continue
+        g = grade_by_index[idx] if idx < len(grade_by_index) else 0.0
+        if abs(g) < thr:
+            continue
+        # Prefer replacing 'onto {name}' first, else 'along {name}' (first occurrence only)
+        if g > 0:
+            s_new = s.replace(f"onto {nm}", f"up {nm}", 1)
+            if s_new == s:
+                s_new = s.replace(f"along {nm}", f"up {nm}", 1)
+        else:
+            s_new = s.replace(f"onto {nm}", f"down {nm}", 1)
+            if s_new == s:
+                s_new = s.replace(f"along {nm}", f"down {nm}", 1)
+        s = s_new
+    return s
+
 # --- Fair, interleaved reverse-geocode prefetch to avoid starving the 2nd route ---
 def _prefetch_reverse_for_routes(routes: list[dict], max_pts_each: int = 180) -> int:
     try:
@@ -871,6 +942,43 @@ def reverse_cache_lookup(lat: float, lon: float, *, zooms=(18,17,16)):
     _REVERSE_CACHE[k] = None
     return None
 
+
+def _window_dominant_names(names: list[str], window: int = 7, min_dom: float = 0.6) -> list[str]:
+    """
+    Smooth names by taking the dominant non-blank label in a moving window.
+    A name is adopted at position i only if it accounts for >= min_dom of
+    the non-blank entries in the window centered at i; otherwise carry forward.
+    """
+    if not names:
+        return []
+    n = len(names)
+    k = max(1, window//2)
+    out = []
+    last = (names[0] or "").strip()
+    for i in range(n):
+        lo = max(0, i-k); hi = min(n, i+k+1)
+        win = [(names[j] or "").strip() for j in range(lo, hi)]
+        nb = [w for w in win if w]
+        if not nb:
+            out.append(last)
+            continue
+        # count
+        counts = {}
+        for w in nb:
+            counts[w.lower()] = counts.get(w.lower(), 0) + 1
+        # dominant
+        label_lower, cnt = max(counts.items(), key=lambda x: x[1])
+        dom = cnt/len(nb)
+        if dom >= min_dom:
+            # use proper casing from first occurrence in window
+            for w in win:
+                if w and w.lower() == label_lower:
+                    chosen = w
+                    break
+            last = chosen
+        out.append(last)
+    return out
+
 def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     """On-route segments using cached reverse geocoding; keep more steps for clearer directions."""
     if not polyline:
@@ -896,9 +1004,15 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             last = nm or "Unnamed"
         else:
             raw[-1]["coords"].append((lat, lon))
-    MIN_SEG_LEN = 25.0
-    MIN_SHARE = 0.008
+    MIN_SEG_LEN = 20.0
+    MIN_SHARE = 0.006
     strict = []
+    # Dynamic easing for short routes
+    total = float(tot_len) if tot_len else 0.0
+    if total and total < 6000:
+        MIN_SEG_LEN = 15.0
+        MIN_CONSEC_PTS = 2
+        MIN_SHARE = 0.004
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
         if not nm or nm.lower() == "unnamed":
@@ -1117,6 +1231,30 @@ def route_blurb(label, r: dict) -> str:
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
     sentence = cached_sentence_for_route(r, max_segments=26)
+
+    # Elevation-aware phrasing (up/down) — light touch
+    try:
+        segs = onroute_named_segments(r.get("polyline") or "", max_pts=200)
+        # collect unique endpoints for elevation calls
+        edge_pts = []
+        for seg in segs:
+            coords = seg.get("coords") or []
+            if not coords: 
+                continue
+            a = coords[0]; b = coords[-1]
+            edge_pts.extend([a,b])
+        # dedupe while preserving order
+        seen = set(); uniq = []
+        for p in edge_pts:
+            if p not in seen:
+                uniq.append(p); seen.add(p)
+        elevs = _elevations_for_points(uniq)
+        if elevs:
+            e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
+            grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]
+            sentence = _apply_updown(sentence, segs, grades, thr=0.010)
+    except Exception:
+        pass
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
