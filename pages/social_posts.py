@@ -6,6 +6,8 @@ import re
 import random
 import urllib.parse
 from datetime import datetime
+
+SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
 import os
