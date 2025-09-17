@@ -647,16 +647,6 @@ routes = [build_route_dict(0), build_route_dict(1)]
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
-
-# Optional: preload directions cache for these routes
-with st.expander("⚡ Preload directions (faster generation)", expanded=False):
-    if st.button("Preload now", use_container_width=True):
-        with st.spinner("Preloading directions…"):
-            warmed = preload_directions_for_routes(routes)
-        st.success(f"Preloaded directions for {warmed} route(s).")
-
-
-
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
     is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
@@ -938,36 +928,6 @@ def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
         parts.append(f"{connector} {art}{nm}")
 
     return "We’ll be running " + ", ".join(parts) + "."
-
-
-# ---- Caching & Preload helpers ----
-@st.cache_data(ttl=7*24*3600, show_spinner=False)
-def cached_turns_sentence(polyline: str | None, url_or_rid: str | None) -> str:
-    """Cache the computed directions for a route (by polyline and URL/ID) for 7 days."""
-    route_dict = {"polyline": polyline, "url": url_or_rid, "rid": _extract_route_id(url_or_rid or "")}
-    try:
-        return describe_turns_sentence(route_dict)
-    except Exception:
-        return ""
-
-def preload_directions_for_routes(route_list: list[dict]) -> int:
-    """Warm the cache for a list of route dicts (concurrently). Returns number of items warmed."""
-    try:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-    except Exception:
-        # Fallback to sequential if concurrency not available
-        warmed = 0
-        for r in route_list:
-            _ = cached_turns_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
-            warmed += 1
-        return warmed
-
-    warmed = 0
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(cached_turns_sentence, r.get("polyline"), r.get("url") or r.get("rid")) for r in route_list]
-        for _ in as_completed(futs):
-            warmed += 1
-    return warmed
 
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
