@@ -11,7 +11,7 @@ from datetime import datetime
 import streamlit as st
 # --- Cached directions helpers (single source of truth) ---
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
-def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 22) -> str:
+def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 26) -> str:
     """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
     try:
         rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
@@ -25,7 +25,7 @@ def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, ma
     except Exception:
         return ""
 
-def cached_sentence_for_route(r: dict, max_segments: int = 22) -> str:
+def cached_sentence_for_route(r: dict, max_segments: int = 26) -> str:
     return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
 
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
@@ -880,7 +880,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     return merged
 
 
-def _stable_name_sequence(names: list[str], confirm: int = 3) -> list[str]:
+def _stable_name_sequence(names: list[str], confirm: int = 2) -> list[str]:
     if not names:
         return []
     out = [names[0]]
@@ -901,7 +901,7 @@ def _stable_name_sequence(names: list[str], confirm: int = 3) -> list[str]:
     return out
 
 
-def onroute_named_segments(polyline: str, *, max_pts: int = 160):
+def onroute_named_segments(polyline: str, *, max_pts: int = 240):
     if not polyline:
         return []
     pts = _sample_points(polyline, max_pts=max_pts)
@@ -921,7 +921,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 160):
         nm = reverse_cache_lookup(lat, lon) or ""
         nm = "" if nm.lower()=="unnamed road" else nm.strip()
         raw_names.append(nm)
-    names = _stable_name_sequence(raw_names, confirm=3)
+    names = _stable_name_sequence(raw_names, confirm=2)
     raw = []
     last = None
     for (latlon, nm) in zip(pts, names):
@@ -931,9 +931,9 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 160):
             last = nm
         else:
             raw[-1]["coords"].append(latlon)
-    MIN_SEG_LEN = 35.0
-    MIN_CONSEC_PTS = 4
-    MIN_SHARE = 0.010
+    MIN_SEG_LEN = 20.0
+    MIN_CONSEC_PTS = 3
+    MIN_SHARE = 0.006
     strict = []
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
@@ -1039,7 +1039,7 @@ def cached_sentence_for_route(r: dict) -> str:
 
 
 @st.cache_data(ttl=7*24*3600, show_spinner=False)
-def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 22) -> str:
+def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 26) -> str:
     """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
     try:
         rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
@@ -1047,7 +1047,7 @@ def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, ma
     except Exception:
         return ""
 
-def cached_sentence_for_route(r: dict, max_segments: int = 22) -> str:
+def cached_sentence_for_route(r: dict, max_segments: int = 26) -> str:
     return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
 
 def route_blurb(label, r: dict) -> str:
@@ -1077,7 +1077,7 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = cached_sentence_for_route(r, max_segments=22)
+    sentence = cached_sentence_for_route(r, max_segments=26)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
