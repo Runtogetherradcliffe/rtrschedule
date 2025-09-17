@@ -7,6 +7,26 @@ import random
 import urllib.parse
 from datetime import datetime
 
+
+# --- Cached directions helpers (single source of truth) ---
+@st.cache_data(ttl=7*24*3600, show_spinner=False)
+def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 22) -> str:
+    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
+    try:
+        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
+        return describe_turns_sentence(rd, max_segments=max_segments)
+    except TypeError:
+        # Back-compat if describe_turns_sentence doesn't accept max_segments
+        try:
+            return describe_turns_sentence(rd)
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+def cached_sentence_for_route(r: dict, max_segments: int = 22) -> str:
+    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
+
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
@@ -850,6 +870,81 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
         share = (length/tot_len) if tot_len>0 else 0.0
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
+            strict.append({"name": nm, "coords": coords})
+    merged = []
+    for seg in strict:
+        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
+            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
+        else:
+            merged[-1]["coords"].extend(seg["coords"])
+    return merged
+
+
+def _stable_name_sequence(names: list[str], confirm: int = 3) -> list[str]:
+    if not names:
+        return []
+    out = [names[0]]
+    cur = names[0]; run = 1
+    for i in range(1, len(names)):
+        n = names[i] or ""
+        if n == cur:
+            run += 1; out.append(cur)
+        else:
+            same = 1
+            for j in range(i+1, min(i+confirm, len(names))):
+                if names[j] == n: same += 1
+                else: break
+            if same >= confirm:
+                cur = n; run = same; out.append(cur)
+            else:
+                out.append(cur)
+    return out
+
+
+def onroute_named_segments(polyline: str, *, max_pts: int = 160):
+    if not polyline:
+        return []
+    pts = _sample_points(polyline, max_pts=max_pts)
+    if not pts:
+        return []
+    def haversine(a, b):
+        import math
+        lat1, lon1 = a; lat2, lon2 = b
+        R = 6371000.0
+        dlat = math.radians(lat2 - lat1); dlon = math.radians(lon2 - lon1)
+        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
+        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
+        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
+    tot_len = sum(haversine(pts[i-1], pts[i]) for i in range(1, len(pts)))
+    raw_names = []
+    for (lat, lon) in pts:
+        nm = reverse_cache_lookup(lat, lon) or ""
+        nm = "" if nm.lower()=="unnamed road" else nm.strip()
+        raw_names.append(nm)
+    names = _stable_name_sequence(raw_names, confirm=3)
+    raw = []
+    last = None
+    for (latlon, nm) in zip(pts, names):
+        nm = nm or ""
+        if not raw or (nm != last):
+            raw.append({"name": nm or "Unnamed", "coords": [latlon]})
+            last = nm
+        else:
+            raw[-1]["coords"].append(latlon)
+    MIN_SEG_LEN = 35.0
+    MIN_CONSEC_PTS = 4
+    MIN_SHARE = 0.010
+    strict = []
+    for idx, seg in enumerate(raw):
+        nm = (seg["name"] or "").strip()
+        if not nm or nm.lower()=="unnamed":
+            continue
+        coords = seg.get("coords") or []
+        if len(coords) < 2:
+            continue
+        length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
+        share = (length/tot_len) if tot_len>0 else 0.0
+        if idx in (0, len(raw)-1) or (length >= MIN_SEG_LEN and len(coords) >= MIN_CONSEC_PTS) or share >= MIN_SHARE:
             strict.append({"name": nm, "coords": coords})
     merged = []
     for seg in strict:
