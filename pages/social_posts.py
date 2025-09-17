@@ -35,6 +35,7 @@ import urllib.parse
 from datetime import datetime
 
 
+from sheets import load_schedule
 try:
     from app_config import get_cfg
 except Exception:
@@ -590,20 +591,11 @@ def csv_url_candidates(url: str, sheet_name: str = "Schedule"):
     return uniq
 
 # Build candidates and try each
-csv_candidates = csv_url_candidates(sheet_url, sheet_name=get_cfg("SHEET_NAME","Schedule"))
-sched = None
-err = None
-for cu in csv_candidates:
-    try:
-        sched = pd.read_csv(cu)
-        break
-    except Exception as e:
-        err = e
-if sched is None:
-    st.error("Couldn't read the Google Sheet as CSV. Is it shared correctly?")
+try:
+    df = load_schedule(sheet_url=sheet_url, sheet_name=get_cfg("SHEET_NAME", "Schedule"))
+except Exception as e:
+    st.error(f"Couldn't read the Google Sheet. {e}")
     st.stop()
-
-
 # Column mapping (as per your master sheet)
 date_col = "Date (Thu)"
 r_names = ["Route 1 - Name", "Route 2 - Name"]
