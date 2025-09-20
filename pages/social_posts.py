@@ -875,6 +875,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
             strict.append({"name": nm, "coords": coords})
     merged = []
+    _prelist = list(merged)
     for seg in strict:
         if not merged or merged[-1]["name"].lower() != seg["name"].lower():
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
