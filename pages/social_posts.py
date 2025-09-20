@@ -889,7 +889,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
         else:
             merged[-1]["coords"].extend(seg["coords"])
-    # --- Main roads guarantee (>= 800 m total), deterministic order by first occurrence ---
+    # --- Length-based must-include (sum per canonical name), deterministic order ---
     try:
         def _seg_len_m(coords):
             if not coords or len(coords) < 2: 
@@ -899,104 +899,37 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
                 s += _haversine_m(coords[i-1], coords[i])
             return s
         pool = _prelist if '_prelist' in locals() and _prelist else (merged if 'merged' in locals() else (strict if 'strict' in locals() else []))
-        sum_by_name, first_idx = {}, {}
+        sum_by_name, rep_by, first_idx = {}, {}, {}
         for idx, _seg in enumerate(pool):
             nm = (_seg.get("name") or "").strip()
-            if not nm: 
-                continue
-            key = (_canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower())
+            if not nm: continue
+            key = _canonical_name(nm).lower()
             L = _seg_len_m(_seg.get("coords") or [])
             sum_by_name[key] = sum_by_name.get(key, 0.0) + L
+            if key not in rep_by or L > _seg_len_m(rep_by[key].get("coords") or []):
+                rep_by[key] = _seg
             if key not in first_idx:
                 first_idx[key] = idx
-        MUST = 1000.0
+        # thresholds: short routes (<=6 km) 800m, long routes 1000m
         try:
             _tot = float(tot_len)
         except Exception:
             _tot = 0.0
-        if _tot and _tot <= 6000:
-            MUST = 800.0
-        must_keys = [k for k,L in sum_by_name.items() if L >= MUST]
-        must_keys.sort(key=lambda k: first_idx.get(k, 1e9))
-        # inject synthetic segments if missing (name-only) to avoid geometry pruning
+        THRESH = 800.0 if (_tot and _tot <= 6000) else 1000.0
+        must = [k for k,L in sum_by_name.items() if L >= THRESH]
+        must.sort(key=lambda k: first_idx.get(k, 1e9))
+        # current final list
         final_list = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
         present = set(((seg.get("name") or "").strip().lower()) for seg in final_list)
-        for k in must_keys:
-            if k not in present:
-                final_list.append({"name": (k.title() if '_canonical_name' not in globals() else _canonical_name(k)), "coords": []})
+        for k in must:
+            if k not in present and k in rep_by:
+                final_list.append(rep_by[k])
         if 'merged' in locals():
             merged = final_list
         else:
             strict = final_list
     except Exception:
         pass
-    # --- Route-specific must-have names for known club routes (stable across runs) ---
-    try:
-        # Determine candidate final list
-        _final = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
-        # Build name->sumLen and representative from prelist (if available)
-        def _seg_len_m(coords):
-            if not coords or len(coords) < 2: 
-                return 0.0
-            s = 0.0
-            for i in range(1, len(coords)):
-                s += _haversine_m(coords[i-1], coords[i])
-            return s
-        pool = _prelist if '_prelist' in locals() and _prelist else _final
-        sum_by_name = {}
-        rep_by = {}
-        for _seg in pool:
-            nm = (_seg.get("name") or "").strip()
-            if not nm: 
-                continue
-            key = _canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower()
-            L = _seg_len_m(_seg.get("coords") or [])
-            sum_by_name[key] = sum_by_name.get(key, 0.0) + L
-            if key not in rep_by or L > _seg_len_m(rep_by[key].get("coords") or []):
-                rep_by[key] = _seg
-
-        # Known Strava route IDs for special handling
-        MUST_BY_ROUTE = {
-            "3143973626518069634": ["Stand Lane", "Radcliffe New Road", "Outwood Road"],  # RNR, Ringley, Outwood (5k)
-            "3111044010084213850": ["Pilkington Way", "Outwood Road", "Stand Lane", "Radcliffe New Road"],  # 3 peaks (8k)
-        }
-        # Fetch current route id from a global 'CURRENT_ROUTE_ID' if the caller set it, otherwise detect from context later
-        must_names = set()
-        try:
-            rid = globals().get("CURRENT_ROUTE_ID")
-            if isinstance(rid, str):
-                rid_key = rid.strip()
-            else:
-                rid_key = None
-        except Exception:
-            rid_key = None
-        # If no explicit rid provided, try to sniff from any available 'r' in locals (best effort)
-        if not rid_key and 'r' in locals():
-            url = (r.get("url") or r.get("rid") or "")
-            m = re.search(r"/routes/(\d+)", url)
-            rid_key = m.group(1) if m else None
-
-        if rid_key and rid_key in MUST_BY_ROUTE:
-            for nm in MUST_BY_ROUTE[rid_key]:
-                key = _canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower()
-                # Only add if it actually appears somewhere in prelist (avoid false inserts)
-                if key in sum_by_name:
-                    must_names.add(key)
-
-        # Append missing must-have names using the representative segment (keeps geometry if we have it)
-        present = set(((_seg.get("name") or "").strip().lower()) for _seg in _final)
-        for key in must_names - present:
-            rep = rep_by.get(key)
-            if rep:
-                _final.append(rep)
-        # Write back
-        if 'merged' in locals():
-            merged = _final
-        else:
-            strict = _final
-    except Exception:
-        pass
-
 
     return merged
 
