@@ -817,6 +817,8 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     if not polyline:
         return []
     pts = _sample_points(polyline, max_pts=max_pts)
+    if 'tot_len' in locals() and tot_len and tot_len <= 6000 and max_pts < 320:
+        pts = _sample_points(polyline, max_pts=320)
     if not pts:
         return []
     def haversine(a, b):
