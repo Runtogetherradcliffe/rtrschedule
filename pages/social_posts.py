@@ -930,6 +930,24 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             strict = final_list
     except Exception:
         pass
+    # --- Final uniqueness: keep only first occurrence of each canonical name ---
+    try:
+        final_list = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
+        seen = set(); uniq = []
+        for _seg in final_list:
+            nm = (_seg.get("name") or "").strip()
+            key = (_canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            uniq.append(_seg)
+        if 'merged' in locals():
+            merged = uniq
+        else:
+            strict = uniq
+    except Exception:
+        pass
+
 
     return merged
 
