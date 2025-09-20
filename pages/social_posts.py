@@ -900,6 +900,53 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         merged = _out
     else:
         strict = _out
+    # --- Final fallback: if too few segments survived, rebuild from prelist by longest unique roads ---
+    try:
+        MIN_KEEP = 4  # ensure at least this many roads
+        candidate = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
+        if len(candidate) < MIN_KEEP:
+            # Build length per name from _prelist
+            def _seg_len_m(coords):
+                if not coords or len(coords) < 2: 
+                    return 0.0
+                s = 0.0
+                for i in range(1, len(coords)):
+                    s += _haversine_m(coords[i-1], coords[i])
+                return s
+            _by_name = {}
+            for _seg in (_prelist if '_prelist' in locals() else candidate):
+                nm = (_seg.get("name") or "").strip()
+                if not nm:
+                    continue
+                L = _seg_len_m(_seg.get("coords") or [])
+                low = nm.lower()
+                if low not in _by_name or L > _by_name[low][0]:
+                    _by_name[low] = (L, _seg)
+            # take top K longest distinct names, keep route order by first occurrence
+            K = 6
+            # order by first index in prelist
+            order = {}
+            seq = [(_seg.get("name") or "").strip().lower() for _seg in (_prelist if '_prelist' in locals() else candidate)]
+            for i, nm in enumerate(seq):
+                if nm and nm not in order:
+                    order[nm] = i
+            tops = sorted(_by_name.items(), key=lambda kv: (-kv[1][0], order.get(kv[0], 1e9)))
+            chosen = set()
+            rebuilt = []
+            for nm, (L, seg) in tops:
+                if nm and nm not in chosen:
+                    rebuilt.append(seg)
+                    chosen.add(nm)
+                if len(rebuilt) >= max(MIN_KEEP, min(K, len(_by_name))):
+                    break
+            # Write back
+            if 'merged' in locals():
+                merged = rebuilt
+            else:
+                strict = rebuilt
+    except Exception:
+        pass
+
 
     return merged
 
