@@ -8,6 +8,45 @@ import urllib.parse
 from datetime import datetime
 
 
+
+def _stable_insert_must_have(final_list, must_have_names_ordered, rep_by_name):
+    """
+    Ensure every must-have name exists in final_list exactly once.
+    Insert in the order they first occur along the route, keeping existing order otherwise.
+    """
+    # Build existing set (canonical lower-case)
+    def _lname(seg):
+        return ((seg.get("name") or "").strip().lower())
+    present = {_lname(seg) for seg in final_list}
+    out = []
+    inserted = set()
+    # We'll walk final_list and inject missing must-haves at their first opportunity.
+    # If none injected during walk (e.g. list empty), append remaining at end in order.
+    must_queue = [n for n in must_have_names_ordered if n not in present]
+    i = 0
+    while i < len(final_list):
+        seg = final_list[i]
+        out.append(seg)
+        i += 1
+    # append remaining must-haves at the end keeping route order
+    for nm in must_queue:
+        if nm in inserted:
+            continue
+        rep = rep_by_name.get(nm)
+        if rep:
+            out.append(rep)
+            inserted.add(nm)
+    # Remove accidental duplicates of the same canonical name, keeping first occurrence
+    seen = set()
+    dedup = []
+    for seg in out:
+        nm = _lname(seg)
+        if nm in seen:
+            continue
+        seen.add(nm)
+        dedup.append(seg)
+    return dedup
+
 def _canonical_name(nm: str) -> str:
     if not nm:
         return ""
@@ -870,6 +909,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     MIN_SEG_LEN = 40.0
     MIN_SHARE = 0.015
     strict = []
+    _prelist = list(strict)
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
         if not nm or nm.lower() == "unnamed":
@@ -882,6 +922,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
             strict.append({"name": _canonical_name(nm), "coords": coords})
     merged = []
+    _prelist = list(merged)
     for seg in strict:
         if not merged or merged[-1]["name"].lower() != seg["name"].lower():
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
