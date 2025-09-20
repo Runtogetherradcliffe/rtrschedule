@@ -14,29 +14,6 @@ import os
 import hashlib
 import streamlit as st
 
-from math import radians, sin, cos, atan2, sqrt
-
-def _haversine_m(a, b):
-    lat1, lon1 = a; lat2, lon2 = b
-    R = 6371000.0
-    dlat = radians(lat2 - lat1); dlon = radians(lon2 - lon1)
-    sa = sin(dlat/2.0); sb = sin(dlon/2.0)
-    aa = sa*sa + cos(radians(lat1))*cos(radians(lat2))*sb*sb
-    return 2*R*atan2(sqrt(aa), sqrt(1 - aa))
-
-def _point_to_polyline_m(pt, poly_pts):
-    if not poly_pts or len(poly_pts) == 1:
-        return 1e9
-    best = 1e9
-    for i in range(1, len(poly_pts)):
-        a = poly_pts[i-1]; b = poly_pts[i]
-        mid = ((a[0]+b[0])/2.0, (a[1]+b[1])/2.0)
-        d = min(_haversine_m(pt, a), _haversine_m(pt, b), _haversine_m(pt, mid))
-        if d < best:
-            best = d
-    return best
-
-
 # Debug container to avoid NameError even if later code fails to set it
 poi_debug: list = []
 from typing import List, Dict
@@ -875,79 +852,11 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
             strict.append({"name": nm, "coords": coords})
     merged = []
-    _prelist = list(merged)
     for seg in strict:
         if not merged or merged[-1]["name"].lower() != seg["name"].lower():
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
         else:
             merged[-1]["coords"].extend(seg["coords"])
-    # Snap-to-route filter
-    try:
-        route_pts = _sample_points(polyline, max_pts=260)
-    except Exception:
-        route_pts = []
-    FILTER_BUFFER_M = 18.0
-    _out = []
-    final_list = locals().get('merged') or locals().get('strict') or []
-    for _seg in final_list:
-        _coords = _seg.get("coords") or []
-        if len(_coords) < 2 or not route_pts:
-            continue
-        _mid = _coords[len(_coords)//2]
-        if _point_to_polyline_m(_mid, route_pts) <= FILTER_BUFFER_M:
-            _out.append(_seg)
-    if 'merged' in locals():
-        merged = _out
-    else:
-        strict = _out
-    # --- Final fallback: if too few segments survived, rebuild from prelist by longest unique roads ---
-    try:
-        MIN_KEEP = 4  # ensure at least this many roads
-        candidate = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
-        if len(candidate) < MIN_KEEP:
-            # Build length per name from _prelist
-            def _seg_len_m(coords):
-                if not coords or len(coords) < 2: 
-                    return 0.0
-                s = 0.0
-                for i in range(1, len(coords)):
-                    s += _haversine_m(coords[i-1], coords[i])
-                return s
-            _by_name = {}
-            for _seg in (_prelist if '_prelist' in locals() else candidate):
-                nm = (_seg.get("name") or "").strip()
-                if not nm:
-                    continue
-                L = _seg_len_m(_seg.get("coords") or [])
-                low = nm.lower()
-                if low not in _by_name or L > _by_name[low][0]:
-                    _by_name[low] = (L, _seg)
-            # take top K longest distinct names, keep route order by first occurrence
-            K = 6
-            # order by first index in prelist
-            order = {}
-            seq = [(_seg.get("name") or "").strip().lower() for _seg in (_prelist if '_prelist' in locals() else candidate)]
-            for i, nm in enumerate(seq):
-                if nm and nm not in order:
-                    order[nm] = i
-            tops = sorted(_by_name.items(), key=lambda kv: (-kv[1][0], order.get(kv[0], 1e9)))
-            chosen = set()
-            rebuilt = []
-            for nm, (L, seg) in tops:
-                if nm and nm not in chosen:
-                    rebuilt.append(seg)
-                    chosen.add(nm)
-                if len(rebuilt) >= max(MIN_KEEP, min(K, len(_by_name))):
-                    break
-            # Write back
-            if 'merged' in locals():
-                merged = rebuilt
-            else:
-                strict = rebuilt
-    except Exception:
-        pass
-
-
     return merged
 
 def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
@@ -1048,12 +957,6 @@ def route_blurb(label, r: dict) -> str:
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
     sentence = describe_turns_sentence(r)
-    # Deduplicate sentence append
-    st.session_state.setdefault('DUPLICATE_GUARD', set())
-    _key = (r.get("rid") or r.get("url") or r.get("name") or "").strip()
-    APPEND_SENTENCE_FLAG = _key not in st.session_state['DUPLICATE_GUARD']
-    if APPEND_SENTENCE_FLAG:
-        st.session_state['DUPLICATE_GUARD'].add(_key)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
