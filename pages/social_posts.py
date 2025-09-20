@@ -1,4 +1,3 @@
-import streamlit as st
 
 # pages/social_posts.py
 # Build: v2025.09.01-SOCIAL-24 (rebuild: robust date-only + Strava/LocationIQ enrichment)
@@ -8,143 +7,35 @@ import random
 import urllib.parse
 from datetime import datetime
 
-
-
-
-
-@st.cache_data(ttl=7*24*3600, show_spinner=False)
-def cached_onroute_segments(polyline: str, max_pts: int = 240):
-    try:
-        return onroute_named_segments(polyline, max_pts=max_pts)
-    except Exception:
-        return []
-
-# --- Elevation-assisted phrasing (up/down) ---
-import requests
-from math import radians, sin, cos, atan2, sqrt
-
-def _hv_dist(a, b):
-    # meters
-    lat1, lon1 = a; lat2, lon2 = b
-    R = 6371000.0
-    dlat = radians(lat2 - lat1); dlon = radians(lon2 - lon1)
-    sa = sin(dlat/2.0); sb = sin(dlon/2.0)
-    aa = sa*sa + cos(radians(lat1))*cos(radians(lat2))*sb*sb
-    return 2*R*atan2(sqrt(aa), sqrt(1-aa))
-
-@st.cache_data(ttl=14*24*3600, show_spinner=False)
-def _elevations_for_points(points: list[tuple]) -> list | None:
-    """Fetch elevations (meters) for a list of (lat,lon) using open-elevation; returns list aligned to input or None on failure."""
-    if not points:
-        return []
-    try:
-        # Batch up to ~90 per request
-        elevs = []
-        batch = 90
-        for i in range(0, len(points), batch):
-            chunk = points[i:i+batch]
-            locs = "|".join(f"{lat:.6f},{lon:.6f}" for (lat,lon) in chunk)
-            url = f"https://api.open-elevation.com/api/v1/lookup?locations={locs}"
-            resp = requests.get(url, timeout=10)
-            if resp.status_code != 200:
-                return None
-            data = resp.json().get("results", [])
-            if len(data) != len(chunk):
-                return None
-            elevs.extend([r.get("elevation") for r in data])
-        return elevs
-    except Exception:
-        return None
-
-def _segment_grade(seg_coords: list[tuple], elev_map: dict) -> float:
-    """Return average grade (rise/run) for a segment using first/last points; positive = uphill."""
-    if not seg_coords:
-        return 0.0
-    a = seg_coords[0]; b = seg_coords[-1]
-    e1 = elev_map.get(a); e2 = elev_map.get(b)
-    if e1 is None or e2 is None:
-        return 0.0
-    run = max(_hv_dist(a,b), 1.0)
-    return (e2 - e1) / run
-
-def _apply_updown(sentence: str, segs: list[dict], grade_by_index: list[float], thr: float = 0.012, outback_names: set[str] | None = None) -> str:
-    """Replace 'along/onto {name}' with 'up/down' where grade magnitude exceeds threshold. One-pass, ordered replacements."""
-    s = sentence
-    for idx, seg in enumerate(segs):
-        if outback_names and (seg.get('name') or '').strip().lower() in outback_names:
-            # Neutral phrasing for out-and-back roads
-            continue
-        nm = (seg.get("name") or "").strip()
-        if not nm: 
-            continue
-        g = grade_by_index[idx] if idx < len(grade_by_index) else 0.0
-        if abs(g) < thr:
-            continue
-        # Prefer replacing 'onto {name}' first, else 'along {name}' (first occurrence only)
-        if g > 0:
-            s_new = s.replace(f"onto {nm}", f"up {nm}", 1)
-            if s_new == s:
-                s_new = s.replace(f"along {nm}", f"up {nm}", 1)
-        else:
-            s_new = s.replace(f"onto {nm}", f"down {nm}", 1)
-            if s_new == s:
-                s_new = s.replace(f"along {nm}", f"down {nm}", 1)
-        s = s_new
-    return s
-
-# --- Fair, interleaved reverse-geocode prefetch to avoid starving the 2nd route ---
-def _prefetch_reverse_for_routes(routes: list[dict], max_pts_each: int = 180) -> int:
-    try:
-        # Build per-route sampled points
-        samples = []
-        for r in routes:
-            pl = r.get("polyline")
-            pts = _sample_points(pl, max_pts=max_pts_each) if pl else []
-            samples.append(pts)
-        # Interleave calls: round-robin through the lists
-        calls = 0
-        idx = 0
-        more = True
-        while more:
-            more = False
-            for pts in samples:
-                if idx < len(pts):
-                    lat, lon = pts[idx]
-                    try:
-                        # Reverse lookup is usually cached; this will be a no-op if already fetched
-                        _ = reverse_cache_lookup(lat, lon)
-                        calls += 1
-                    except Exception:
-                        pass
-                    more = True
-            idx += 1
-        return calls
-    except Exception:
-        return 0
-# --- Cached directions helpers (single source of truth) ---
-@st.cache_data(ttl=7*24*3600, show_spinner=False)
-def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 26) -> str:
-    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
-    try:
-        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
-        return describe_turns_sentence(rd, max_segments=max_segments)
-    except TypeError:
-        # Back-compat if describe_turns_sentence doesn't accept max_segments
-        try:
-            return describe_turns_sentence(rd)
-        except Exception:
-            return ""
-    except Exception:
-        return ""
-
-def cached_sentence_for_route(r: dict, max_segments: int = 26) -> str:
-    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
-
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
 import os
 import hashlib
+import streamlit as st
+
+from math import radians, sin, cos, atan2, sqrt
+
+def _haversine_m(a, b):
+    lat1, lon1 = a; lat2, lon2 = b
+    R = 6371000.0
+    dlat = radians(lat2 - lat1); dlon = radians(lon2 - lon1)
+    sa = sin(dlat/2.0); sb = sin(dlon/2.0)
+    aa = sa*sa + cos(radians(lat1))*cos(radians(lat2))*sb*sb
+    return 2*R*atan2(sqrt(aa), sqrt(1 - aa))
+
+def _point_to_polyline_m(pt, poly_pts):
+    if not poly_pts or len(poly_pts) == 1:
+        return 1e9
+    best = 1e9
+    for i in range(1, len(poly_pts)):
+        a = poly_pts[i-1]; b = poly_pts[i]
+        mid = ((a[0]+b[0])/2.0, (a[1]+b[1])/2.0)
+        d = min(_haversine_m(pt, a), _haversine_m(pt, b), _haversine_m(pt, mid))
+        if d < best:
+            best = d
+    return best
+
 
 # Debug container to avoid NameError even if later code fails to set it
 poi_debug: list = []
@@ -779,24 +670,6 @@ routes = [build_route_dict(0), build_route_dict(1)]
 # Enrich from Strava + LocationIQ (prefer Strava distance)
 routes = [enrich_route_dict(r) for r in routes]
 
-# Warm caches fairly for both routes: reverse lookup (already interleaved), segments, and sentences
-try:
-    for _r in routes:
-        pl = _r.get("polyline") or ""
-        _ = cached_onroute_segments(pl, max_pts=220)
-        _ = cached_sentence_for_route(_r, max_segments=26)
-except Exception:
-    pass
-
-
-# Pre-fetch reverse geocodes for both routes (interleaved) to distribute API calls fairly
-try:
-    _ = _prefetch_reverse_for_routes(routes, max_pts_each=200)
-except Exception:
-    pass
-
-
-
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
     is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
@@ -962,43 +835,6 @@ def reverse_cache_lookup(lat: float, lon: float, *, zooms=(18,17,16)):
     _REVERSE_CACHE[k] = None
     return None
 
-
-def _window_dominant_names(names: list[str], window: int = 7, min_dom: float = 0.6) -> list[str]:
-    """
-    Smooth names by taking the dominant non-blank label in a moving window.
-    A name is adopted at position i only if it accounts for >= min_dom of
-    the non-blank entries in the window centered at i; otherwise carry forward.
-    """
-    if not names:
-        return []
-    n = len(names)
-    k = max(1, window//2)
-    out = []
-    last = (names[0] or "").strip()
-    for i in range(n):
-        lo = max(0, i-k); hi = min(n, i+k+1)
-        win = [(names[j] or "").strip() for j in range(lo, hi)]
-        nb = [w for w in win if w]
-        if not nb:
-            out.append(last)
-            continue
-        # count
-        counts = {}
-        for w in nb:
-            counts[w.lower()] = counts.get(w.lower(), 0) + 1
-        # dominant
-        label_lower, cnt = max(counts.items(), key=lambda x: x[1])
-        dom = cnt/len(nb)
-        if dom >= min_dom:
-            # use proper casing from first occurrence in window
-            for w in win:
-                if w and w.lower() == label_lower:
-                    chosen = w
-                    break
-            last = chosen
-        out.append(last)
-    return out
-
 def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     """On-route segments using cached reverse geocoding; keep more steps for clearer directions."""
     if not polyline:
@@ -1024,15 +860,9 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             last = nm or "Unnamed"
         else:
             raw[-1]["coords"].append((lat, lon))
-    MIN_SEG_LEN = 20.0
-    MIN_SHARE = 0.006
+    MIN_SEG_LEN = 40.0
+    MIN_SHARE = 0.015
     strict = []
-    # Dynamic easing for short routes
-    total = float(tot_len) if tot_len else 0.0
-    if total and total < 6000:
-        MIN_SEG_LEN = 15.0
-        MIN_CONSEC_PTS = 2
-        MIN_SHARE = 0.004
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
         if not nm or nm.lower() == "unnamed":
@@ -1050,81 +880,26 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
         else:
             merged[-1]["coords"].extend(seg["coords"])
-    return merged
-
-
-def _stable_name_sequence(names: list[str], confirm: int = 2) -> list[str]:
-    if not names:
-        return []
-    out = [names[0]]
-    cur = names[0]; run = 1
-    for i in range(1, len(names)):
-        n = names[i] or ""
-        if n == cur:
-            run += 1; out.append(cur)
-        else:
-            same = 1
-            for j in range(i+1, min(i+confirm, len(names))):
-                if names[j] == n: same += 1
-                else: break
-            if same >= confirm:
-                cur = n; run = same; out.append(cur)
-            else:
-                out.append(cur)
-    return out
-
-
-def onroute_named_segments(polyline: str, *, max_pts: int = 240):
-    if not polyline:
-        return []
-    pts = _sample_points(polyline, max_pts=max_pts)
-    if not pts:
-        return []
-    def haversine(a, b):
-        import math
-        lat1, lon1 = a; lat2, lon2 = b
-        R = 6371000.0
-        dlat = math.radians(lat2 - lat1); dlon = math.radians(lon2 - lon1)
-        sa = math.sin(dlat/2.0); sb = math.sin(dlon/2.0)
-        aa = sa*sa + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*sb*sb
-        return 2*R*math.atan2(math.sqrt(aa), math.sqrt(1-aa))
-    tot_len = sum(haversine(pts[i-1], pts[i]) for i in range(1, len(pts)))
-    raw_names = []
-    for (lat, lon) in pts:
-        nm = reverse_cache_lookup(lat, lon) or ""
-        nm = "" if nm.lower()=="unnamed road" else nm.strip()
-        raw_names.append(nm)
-    names = _stable_name_sequence(raw_names, confirm=2)
-    raw = []
-    last = None
-    for (latlon, nm) in zip(pts, names):
-        nm = nm or ""
-        if not raw or (nm != last):
-            raw.append({"name": nm or "Unnamed", "coords": [latlon]})
-            last = nm
-        else:
-            raw[-1]["coords"].append(latlon)
-    MIN_SEG_LEN = 20.0
-    MIN_CONSEC_PTS = 3
-    MIN_SHARE = 0.006
-    strict = []
-    for idx, seg in enumerate(raw):
-        nm = (seg["name"] or "").strip()
-        if not nm or nm.lower()=="unnamed":
+    # Snap-to-route filter
+    try:
+        route_pts = _sample_points(polyline, max_pts=260)
+    except Exception:
+        route_pts = []
+    FILTER_BUFFER_M = 18.0
+    _out = []
+    final_list = locals().get('merged') or locals().get('strict') or []
+    for _seg in final_list:
+        _coords = _seg.get("coords") or []
+        if len(_coords) < 2 or not route_pts:
             continue
-        coords = seg.get("coords") or []
-        if len(coords) < 2:
-            continue
-        length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
-        share = (length/tot_len) if tot_len>0 else 0.0
-        if idx in (0, len(raw)-1) or (length >= MIN_SEG_LEN and len(coords) >= MIN_CONSEC_PTS) or share >= MIN_SHARE:
-            strict.append({"name": nm, "coords": coords})
-    merged = []
-    for seg in strict:
-        if not merged or merged[-1]["name"].lower() != seg["name"].lower():
-            merged.append({"name": seg["name"], "coords": list(seg["coords"])})
-        else:
-            merged[-1]["coords"].extend(seg["coords"])
+        _mid = _coords[len(_coords)//2]
+        if _point_to_polyline_m(_mid, route_pts) <= FILTER_BUFFER_M:
+            _out.append(_seg)
+    if 'merged' in locals():
+        merged = _out
+    else:
+        strict = _out
+
     return merged
 
 def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
@@ -1197,32 +972,6 @@ def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
 
     return "We’ll be running " + ", ".join(parts) + "."
 
-
-@st.cache_data(ttl=7*24*3600, show_spinner=False)
-def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None) -> str:
-    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
-    try:
-        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
-        return describe_turns_sentence(rd)
-    except Exception:
-        return ""
-
-def cached_sentence_for_route(r: dict) -> str:
-    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"))
-
-
-@st.cache_data(ttl=7*24*3600, show_spinner=False)
-def _cached_directions_sentence(polyline: str | None, url_or_rid: str | None, max_segments: int = 26) -> str:
-    """Cached wrapper around describe_turns_sentence; keyed by polyline+route id/url."""
-    try:
-        rd = {"polyline": polyline, "url": url_or_rid, "rid": url_or_rid}
-        return describe_turns_sentence(rd, max_segments=max_segments)
-    except Exception:
-        return ""
-
-def cached_sentence_for_route(r: dict, max_segments: int = 26) -> str:
-    return _cached_directions_sentence(r.get("polyline"), r.get("url") or r.get("rid"), max_segments)
-
 def route_blurb(label, r: dict) -> str:
     if isinstance(r.get("dist"), (int,float)):
         dist_txt = f"{r['dist']:.1f} km"
@@ -1250,108 +999,13 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = cached_sentence_for_route(r, max_segments=26)
-
-    # Out-and-back neutralisation (keep neutral wording on repeated streets)
-    try:
-        segs = cached_onroute_segments(r.get("polyline") or "", max_pts=220)
-        name_counts = {}
-        for seg in segs:
-            nm = (seg.get("name") or "").strip()
-            if not nm: 
-                continue
-            k = nm.lower()
-            name_counts[k] = name_counts.get(k, 0) + 1
-        outback_names = {k for k,v in name_counts.items() if v >= 2}
-        # If elevation up/down logic exists, pass outback set to keep those neutral
-        try:
-            sentence  # keep mypy happy
-            _ = _apply_updown  # type: ignore
-            # Build minimal grade list if helpers exist
-            edge_pts = []
-            for seg in segs:
-                coords = seg.get("coords") or []
-                if coords:
-                    edge_pts.extend([coords[0], coords[-1]])
-            # Deduplicate while keeping order
-            seen = set(); uniq = []
-            for p in edge_pts:
-                if p not in seen:
-                    uniq.append(p); seen.add(p)
-            try:
-                elevs = _elevations_for_points(uniq)  # type: ignore
-            except Exception:
-                elevs = None
-            if elevs:
-                e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
-                grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]  # type: ignore
-                sentence = _apply_updown(sentence, segs, grades, thr=0.010, outback_names=outback_names)  # type: ignore
-        except Exception:
-            # No elevation logic: still neutralise by leaving wording unchanged for repeated names
-            pass
-    except Exception:
-        pass
-
-
-    # Elevation-aware phrasing (up/down) with out-and-back neutralisation
-    try:
-        segs = cached_onroute_segments(r.get("polyline") or "", max_pts=220)
-        # out-and-back detection: any street name appearing 2+ times
-        name_counts = {}
-        ordered_names = []
-        for seg in segs:
-            nm = (seg.get("name") or "").strip()
-            if not nm: 
-                continue
-            ordered_names.append(nm)
-            k = nm.lower()
-            name_counts[k] = name_counts.get(k, 0) + 1
-        outback_names = {k for k,v in name_counts.items() if v >= 2}
-        # Collect unique endpoints for elevation calls
-        edge_pts = []
-        for seg in segs:
-            coords = seg.get("coords") or []
-            if not coords: 
-                continue
-            a = coords[0]; b = coords[-1]
-            edge_pts.extend([a,b])
-        seen = set(); uniq = []
-        for p in edge_pts:
-            if p not in seen:
-                uniq.append(p); seen.add(p)
-        try:
-            elevs = _elevations_for_points(uniq)  # cached
-        except NameError:
-            elevs = None
-        if elevs:
-            e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
-            grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]
-            sentence = _apply_updown(sentence, segs, grades, thr=0.010, outback_names=outback_names)
-    except Exception:
-        pass
-    # Elevation-aware phrasing (up/down) — light touch
-    try:
-        segs = onroute_named_segments(r.get("polyline") or "", max_pts=200)
-        # collect unique endpoints for elevation calls
-        edge_pts = []
-        for seg in segs:
-            coords = seg.get("coords") or []
-            if not coords: 
-                continue
-            a = coords[0]; b = coords[-1]
-            edge_pts.extend([a,b])
-        # dedupe while preserving order
-        seen = set(); uniq = []
-        for p in edge_pts:
-            if p not in seen:
-                uniq.append(p); seen.add(p)
-        elevs = _elevations_for_points(uniq)
-        if elevs:
-            e_map = {uniq[i]: elevs[i] for i in range(len(uniq))}
-            grades = [_segment_grade(seg.get("coords") or [], e_map) for seg in segs]
-            sentence = _apply_updown(sentence, segs, grades, thr=0.010)
-    except Exception:
-        pass
+    sentence = describe_turns_sentence(r)
+    # Deduplicate sentence append
+    st.session_state.setdefault('DUPLICATE_GUARD', set())
+    _key = (r.get("rid") or r.get("url") or r.get("name") or "").strip()
+    APPEND_SENTENCE_FLAG = _key not in st.session_state['DUPLICATE_GUARD']
+    if APPEND_SENTENCE_FLAG:
+        st.session_state['DUPLICATE_GUARD'].add(_key)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
@@ -1361,15 +1015,6 @@ def sort_with_labels(r1, r2):
     def d(r): return r["dist"] if r["dist"] is not None else -1
     a, b = (r1, r2) if d(r1) >= d(r2) else (r2, r1)
     return [("8k", a), ("5k", b)]
-
-
-# Auto-preload directions cache for these routes so rendering is fast.
-with st.spinner("Preparing directions…"):
-    try:
-        for _r in routes:
-            _ = cached_sentence_for_route(_r)
-    except Exception:
-        pass
 
 labeled = sort_with_labels(routes[0], routes[1])
 
