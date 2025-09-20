@@ -7,6 +7,34 @@ import random
 import urllib.parse
 from datetime import datetime
 
+
+def _canonical_name(nm: str) -> str:
+    if not nm:
+        return ""
+    s = nm.strip()
+    # Drop leading route numbers like "A56 ", "A665 "
+    s = re.sub(r"^[A-Z]{1,2}\d+\s+", "", s)
+    # Expand abbreviations
+    s = re.sub(r"\brd\b", "Road", s, flags=re.IGNORECASE)
+    s = re.sub(r"\brd\.\b", "Road", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bln\b", "Lane", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bln\.\b", "Lane", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bave\b", "Avenue", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bave\.\b", "Avenue", s, flags=re.IGNORECASE)
+    # Normalise spacing
+    s = re.sub(r"\s+", " ", s).strip()
+    # Local aliases
+    aliases = {
+        "eton hill rd": "Eton Hill Road",
+        "pilkington way (a665)": "Pilkington Way",
+        "bury new rd": "Bury New Road",
+        "bury new road": "Bury New Road",
+        "bury rd": "Bury Road",
+        "bury road": "Bury Road",
+    }
+    key = s.lower()
+    return aliases.get(key, s)
+
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
@@ -639,7 +667,7 @@ def build_route_dict(side_idx: int) -> dict:
     dist = try_float(row.get(r_dist[side_idx], ""))
     elev = None
     pois = ""
-    return {"name": nm, "url": url, "rid": rid, "terrain": terr, "area": area,
+    return {"name": _canonical_name(nm), "url": url, "rid": rid, "terrain": terr, "area": area,
             "dist": dist, "elev": elev, "pois": pois}
 
 routes = [build_route_dict(0), build_route_dict(1)]
@@ -771,7 +799,7 @@ def locationiq_match_steps(polyline: str | None, *, max_pts: int = 120):
                     if steps_out and prev_name and nm.lower() == prev_name.lower():
                         steps_out[-1]["coords"].extend(coords)
                     else:
-                        steps_out.append({"name": nm, "coords": coords, "maneuver": man})
+                        steps_out.append({"name": _canonical_name(nm), "coords": coords, "maneuver": man})
                     prev_name = nm
             if steps_out:
                 return steps_out
@@ -835,7 +863,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     for (lat, lon) in pts:
         nm = reverse_cache_lookup(lat, lon) or None
         if not raw or (nm or "") != (last or ""):
-            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
+            raw.append({"name": _canonical_name(nm) or "Unnamed", "coords": [(lat, lon)]})
             last = nm or "Unnamed"
         else:
             raw[-1]["coords"].append((lat, lon))
@@ -852,7 +880,7 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
         share = (length/tot_len) if tot_len>0 else 0.0
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
-            strict.append({"name": nm, "coords": coords})
+            strict.append({"name": _canonical_name(nm), "coords": coords})
     merged = []
     for seg in strict:
         if not merged or merged[-1]["name"].lower() != seg["name"].lower():
