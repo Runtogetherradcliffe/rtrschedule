@@ -8,45 +8,6 @@ import urllib.parse
 from datetime import datetime
 
 
-
-def _stable_insert_must_have(final_list, must_have_names_ordered, rep_by_name):
-    """
-    Ensure every must-have name exists in final_list exactly once.
-    Insert in the order they first occur along the route, keeping existing order otherwise.
-    """
-    # Build existing set (canonical lower-case)
-    def _lname(seg):
-        return ((seg.get("name") or "").strip().lower())
-    present = {_lname(seg) for seg in final_list}
-    out = []
-    inserted = set()
-    # We'll walk final_list and inject missing must-haves at their first opportunity.
-    # If none injected during walk (e.g. list empty), append remaining at end in order.
-    must_queue = [n for n in must_have_names_ordered if n not in present]
-    i = 0
-    while i < len(final_list):
-        seg = final_list[i]
-        out.append(seg)
-        i += 1
-    # append remaining must-haves at the end keeping route order
-    for nm in must_queue:
-        if nm in inserted:
-            continue
-        rep = rep_by_name.get(nm)
-        if rep:
-            out.append(rep)
-            inserted.add(nm)
-    # Remove accidental duplicates of the same canonical name, keeping first occurrence
-    seen = set()
-    dedup = []
-    for seg in out:
-        nm = _lname(seg)
-        if nm in seen:
-            continue
-        seen.add(nm)
-        dedup.append(seg)
-    return dedup
-
 def _canonical_name(nm: str) -> str:
     if not nm:
         return ""
@@ -928,6 +889,42 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
         else:
             merged[-1]["coords"].extend(seg["coords"])
+    # --- Main roads guarantee (>= 800 m total), deterministic order by first occurrence ---
+    try:
+        def _seg_len_m(coords):
+            if not coords or len(coords) < 2: 
+                return 0.0
+            s = 0.0
+            for i in range(1, len(coords)):
+                s += _haversine_m(coords[i-1], coords[i])
+            return s
+        pool = _prelist if '_prelist' in locals() and _prelist else (merged if 'merged' in locals() else (strict if 'strict' in locals() else []))
+        sum_by_name, first_idx = {}, {}
+        for idx, _seg in enumerate(pool):
+            nm = (_seg.get("name") or "").strip()
+            if not nm: 
+                continue
+            key = (_canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower())
+            L = _seg_len_m(_seg.get("coords") or [])
+            sum_by_name[key] = sum_by_name.get(key, 0.0) + L
+            if key not in first_idx:
+                first_idx[key] = idx
+        MUST = 800.0
+        must_keys = [k for k,L in sum_by_name.items() if L >= MUST]
+        must_keys.sort(key=lambda k: first_idx.get(k, 1e9))
+        # inject synthetic segments if missing (name-only) to avoid geometry pruning
+        final_list = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
+        present = set(((seg.get("name") or "").strip().lower()) for seg in final_list)
+        for k in must_keys:
+            if k not in present:
+                final_list.append({"name": (k.title() if '_canonical_name' not in globals() else _canonical_name(k)), "coords": []})
+        if 'merged' in locals():
+            merged = final_list
+        else:
+            strict = final_list
+    except Exception:
+        pass
+
     return merged
 
 def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
