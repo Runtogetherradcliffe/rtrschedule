@@ -909,7 +909,13 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
             sum_by_name[key] = sum_by_name.get(key, 0.0) + L
             if key not in first_idx:
                 first_idx[key] = idx
-        MUST = 800.0
+        MUST = 1000.0
+        try:
+            _tot = float(tot_len)
+        except Exception:
+            _tot = 0.0
+        if _tot and _tot <= 6000:
+            MUST = 800.0
         must_keys = [k for k,L in sum_by_name.items() if L >= MUST]
         must_keys.sort(key=lambda k: first_idx.get(k, 1e9))
         # inject synthetic segments if missing (name-only) to avoid geometry pruning
