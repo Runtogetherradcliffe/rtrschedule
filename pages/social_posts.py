@@ -873,14 +873,23 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
     if not segs:
         season = (route_dict.get("Season") or route_dict.get("season") or "").strip().lower()
     segs = []
+    prelist_for_must = []
     if season == "road":
         try:
             segs = radar_match_steps(route_dict.get("polyline"), mode="foot", unique=True)
+            # also get a rich prelist for Must Roads checks
+            prelist_for_must = radar_match_steps(route_dict.get("polyline"), mode="foot", unique=False)
         except Exception:
             segs = []
+            prelist_for_must = []
     if not segs:
         steps = locationiq_match_steps(route_dict.get("polyline"))
-        segs = steps if steps else onroute_named_segments(route_dict.get("polyline"))
+        if steps:
+            segs = steps
+            prelist_for_must = steps
+        else:
+            segs = onroute_named_segments(route_dict.get("polyline"))
+            prelist_for_must = list(segs)
     if not segs:
         return ""
 
@@ -890,7 +899,7 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
         if lab.startswith("5"):
             max_segments = max(max_segments, 26)
         elif lab.startswith("8"):
-            max_segments = max(max_segments, 20)
+            max_segments = max(max_segments, 24)
 
     # If road route produced too few names, try non-unique steps then condense
     if (route_dict.get("Season","").lower() == "road") and len(segs) <= 3:
