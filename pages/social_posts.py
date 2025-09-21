@@ -7,40 +7,14 @@ import random
 import urllib.parse
 from datetime import datetime
 
-
-def _canonical_name(nm: str) -> str:
-    if not nm:
-        return ""
-    s = nm.strip()
-    # Drop leading route numbers like "A56 ", "A665 "
-    s = re.sub(r"^[A-Z]{1,2}\d+\s+", "", s)
-    # Expand abbreviations
-    s = re.sub(r"\brd\b", "Road", s, flags=re.IGNORECASE)
-    s = re.sub(r"\brd\.\b", "Road", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bln\b", "Lane", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bln\.\b", "Lane", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bave\b", "Avenue", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bave\.\b", "Avenue", s, flags=re.IGNORECASE)
-    # Normalise spacing
-    s = re.sub(r"\s+", " ", s).strip()
-    # Local aliases
-    aliases = {
-        "eton hill rd": "Eton Hill Road",
-        "pilkington way (a665)": "Pilkington Way",
-        "bury new rd": "Bury New Road",
-        "bury new road": "Bury New Road",
-        "bury rd": "Bury Road",
-        "bury road": "Bury Road",
-    }
-    key = s.lower()
-    return aliases.get(key, s)
-
 SAFETY_NOTE = "As we are now running after dark, please remember lights and hi-viz, be safe, be seen!"
 import pandas as pd
 import requests
 import os
 import hashlib
 import streamlit as st
+from radar import radar_match_steps
+from roads_integration import must_include_from_sheet
 
 # Debug container to avoid NameError even if later code fails to set it
 poi_debug: list = []
@@ -667,7 +641,7 @@ def build_route_dict(side_idx: int) -> dict:
     dist = try_float(row.get(r_dist[side_idx], ""))
     elev = None
     pois = ""
-    return {"name": _canonical_name(nm), "url": url, "rid": rid, "terrain": terr, "area": area,
+    return {"name": nm, "url": url, "rid": rid, "terrain": terr, "area": area,
             "dist": dist, "elev": elev, "pois": pois}
 
 routes = [build_route_dict(0), build_route_dict(1)]
@@ -799,7 +773,7 @@ def locationiq_match_steps(polyline: str | None, *, max_pts: int = 120):
                     if steps_out and prev_name and nm.lower() == prev_name.lower():
                         steps_out[-1]["coords"].extend(coords)
                     else:
-                        steps_out.append({"name": _canonical_name(nm), "coords": coords, "maneuver": man})
+                        steps_out.append({"name": nm, "coords": coords, "maneuver": man})
                     prev_name = nm
             if steps_out:
                 return steps_out
@@ -845,8 +819,6 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     if not polyline:
         return []
     pts = _sample_points(polyline, max_pts=max_pts)
-    if 'tot_len' in locals() and tot_len and tot_len <= 6000 and max_pts < 360:
-        pts = _sample_points(polyline, max_pts=360)
     if not pts:
         return []
     def haversine(a, b):
@@ -863,14 +835,13 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
     for (lat, lon) in pts:
         nm = reverse_cache_lookup(lat, lon) or None
         if not raw or (nm or "") != (last or ""):
-            raw.append({"name": _canonical_name(nm) or "Unnamed", "coords": [(lat, lon)]})
+            raw.append({"name": nm or "Unnamed", "coords": [(lat, lon)]})
             last = nm or "Unnamed"
         else:
             raw[-1]["coords"].append((lat, lon))
     MIN_SEG_LEN = 40.0
     MIN_SHARE = 0.015
     strict = []
-    _prelist = list(strict)
     for idx, seg in enumerate(raw):
         nm = (seg["name"] or "").strip()
         if not nm or nm.lower() == "unnamed":
@@ -881,82 +852,37 @@ def onroute_named_segments(polyline: str, *, max_pts: int = 72):
         length = sum(haversine(coords[i-1], coords[i]) for i in range(1, len(coords)))
         share = (length/tot_len) if tot_len>0 else 0.0
         if idx in (0, len(raw)-1) or length >= MIN_SEG_LEN or share >= MIN_SHARE:
-            strict.append({"name": _canonical_name(nm), "coords": coords})
+            strict.append({"name": nm, "coords": coords})
     merged = []
-    _prelist = list(merged)
     for seg in strict:
         if not merged or merged[-1]["name"].lower() != seg["name"].lower():
             merged.append({"name": seg["name"], "coords": list(seg["coords"])})
         else:
             merged[-1]["coords"].extend(seg["coords"])
-    # --- Length-based must-include (sum per canonical name), deterministic order ---
-    try:
-        def _seg_len_m(coords):
-            if not coords or len(coords) < 2: 
-                return 0.0
-            s = 0.0
-            for i in range(1, len(coords)):
-                s += _haversine_m(coords[i-1], coords[i])
-            return s
-        pool = _prelist if '_prelist' in locals() and _prelist else (merged if 'merged' in locals() else (strict if 'strict' in locals() else []))
-        sum_by_name, rep_by, first_idx = {}, {}, {}
-        for idx, _seg in enumerate(pool):
-            nm = (_seg.get("name") or "").strip()
-            if not nm: continue
-            key = _canonical_name(nm).lower()
-            L = _seg_len_m(_seg.get("coords") or [])
-            sum_by_name[key] = sum_by_name.get(key, 0.0) + L
-            if key not in rep_by or L > _seg_len_m(rep_by[key].get("coords") or []):
-                rep_by[key] = _seg
-            if key not in first_idx:
-                first_idx[key] = idx
-        # thresholds: short routes (<=6 km) 800m, long routes 1000m
-        try:
-            _tot = float(tot_len)
-        except Exception:
-            _tot = 0.0
-        THRESH = 800.0 if (_tot and _tot <= 6000) else 1000.0
-        must = [k for k,L in sum_by_name.items() if L >= THRESH]
-        must.sort(key=lambda k: first_idx.get(k, 1e9))
-        # current final list
-        final_list = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
-        present = set(((seg.get("name") or "").strip().lower()) for seg in final_list)
-        for k in must:
-            if k not in present and k in rep_by:
-                final_list.append(rep_by[k])
-        if 'merged' in locals():
-            merged = final_list
-        else:
-            strict = final_list
-    except Exception:
-        pass
-    # --- Final uniqueness: keep only first occurrence of each canonical name ---
-    try:
-        final_list = merged if 'merged' in locals() else (strict if 'strict' in locals() else [])
-        seen = set(); uniq = []
-        for _seg in final_list:
-            nm = (_seg.get("name") or "").strip()
-            key = (_canonical_name(nm).lower() if '_canonical_name' in globals() else nm.lower())
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            uniq.append(_seg)
-        if 'merged' in locals():
-            merged = uniq
-        else:
-            strict = uniq
-    except Exception:
-        pass
-
-
     return merged
 
-def describe_turns_sentence(route_dict: dict, *, max_segments: int = 14):
+def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_segments: int = 14):
     """Prefer map-matching steps (maneuvers) for Maps-like directions; fallback to on-route segments."""
-    steps = locationiq_match_steps(route_dict.get("polyline"))
-    segs = steps if steps else onroute_named_segments(route_dict.get("polyline"))
+    season = (route_dict.get("Season") or route_dict.get("season") or "").strip().lower()
+    segs = []
+    if season == "road":
+        try:
+            segs = radar_match_steps(route_dict.get("polyline"))
+        except Exception:
+            segs = []
+    if not segs:
+        steps = locationiq_match_steps(route_dict.get("polyline"))
+        segs = steps if steps else onroute_named_segments(route_dict.get("polyline"))
     if not segs:
         return ""
+
+    # Force-include from sheet based on label (8k/5k)
+    must_csv = ""
+    if label and label.strip().lower().startswith("8"):
+        must_csv = route_dict.get("Must Roads A") or route_dict.get("Must Roads 1") or route_dict.get("Must Roads (8k)") or ""
+    elif label and label.strip().lower().startswith("5"):
+        must_csv = route_dict.get("Must Roads B") or route_dict.get("Must Roads 2") or route_dict.get("Must Roads (5k)") or ""
+    segs = must_include_from_sheet(segs, segs, must_csv)
 
     # Optional elevation slope for first segment (if GPX available)
     elev_pts = None
@@ -1048,7 +974,7 @@ def route_blurb(label, r: dict) -> str:
                     seen.add(k); uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = describe_turns_sentence(r)
+    sentence = describe_turns_sentence(r, label)
     if sentence:
         lines.append("  " + sentence)
     return "\n".join(lines)
