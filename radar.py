@@ -77,7 +77,7 @@ def _coords_to_geojson(points: List[Tuple[float, float]]) -> Dict[str,Any]:
     return {"type":"LineString", "coordinates":[[p[1], p[0]] for p in points]}
 
 @st.cache_data(ttl=180*24*3600, show_spinner=False)
-def radar_match_steps(polyline_str: str, mode: str = "foot") -> List[Dict[str,Any]]:
+def radar_match_steps(polyline_str: str, mode: str = "foot", unique: bool = True) -> List[Dict[str,Any]]:
     if not RADAR_API_KEY:
         raise RuntimeError("RADAR_API_KEY is not configured in env or Streamlit secrets.")
     pts = _resample(_decode_polyline(polyline_str), max_pts=300)
@@ -106,4 +106,4 @@ def radar_match_steps(polyline_str: str, mode: str = "foot") -> List[Dict[str,An
                 coords = geom.get("coordinates") or []
                 if name:
                     segments.append({"name": _canonical_name(name), "coords": coords})
-    return _unique_first(segments)
+    return _unique_first(segments) if unique else segments

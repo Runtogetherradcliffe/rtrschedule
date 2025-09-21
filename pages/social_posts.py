@@ -871,10 +871,58 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
         except Exception:
             segs = []
     if not segs:
+        season = (route_dict.get("Season") or route_dict.get("season") or "").strip().lower()
+    segs = []
+    if season == "road":
+        try:
+            segs = radar_match_steps(route_dict.get("polyline"), mode="foot", unique=True)
+        except Exception:
+            segs = []
+    if not segs:
         steps = locationiq_match_steps(route_dict.get("polyline"))
         segs = steps if steps else onroute_named_segments(route_dict.get("polyline"))
     if not segs:
         return ""
+
+    # Dynamic segment budget & anti-truncation for short routes (5k)
+    if label:
+        lab = label.strip().lower()
+        if lab.startswith("5"):
+            max_segments = max(max_segments, 26)
+        elif lab.startswith("8"):
+            max_segments = max(max_segments, 20)
+
+    # If road route produced too few names, try non-unique steps then condense
+    if (route_dict.get("Season","").lower() == "road") and len(segs) <= 3:
+        try:
+            raw_steps = radar_match_steps(route_dict.get("polyline"), mode="foot", unique=False) or []
+            # compress consecutive duplicates by canonical name
+            def _canon(n): 
+                import re
+                s = re.sub(r"^[A-Z]{1,2}\d+\s+","",(n or "").strip())
+                s = re.sub(r"\brd\b|\brd\.\b","Road",s,flags=re.I)
+                s = re.sub(r"\bln\b|\bln\.\b","Lane",s,flags=re.I)
+                s = re.sub(r"\bave\b|\bave\.\b","Avenue",s,flags=re.I)
+                return re.sub(r"\s+"," ",s).strip()
+            condensed = []
+            prevk = None
+            for s in raw_steps:
+                k = _canon(s.get("name") or "").lower()
+                if not k: 
+                    continue
+                if k != prevk:
+                    condensed.append({"name": _canon(s.get("name")), "coords": s.get("coords")})
+                    prevk = k
+            # unique-first preserving order
+            seen=set(); uniq=[]
+            for s in condensed:
+                k = _canon(s.get("name") or "").lower()
+                if k and k not in seen:
+                    seen.add(k); uniq.append(s)
+            if len(uniq) > len(segs):
+                segs = uniq
+        except Exception:
+            pass
 
     # Force-include from sheet based on label (8k/5k)
     must_csv = ""
