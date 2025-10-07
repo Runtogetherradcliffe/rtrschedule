@@ -1,5 +1,5 @@
 
-# helpers/strava_gpx.py (v2 - fixed columns & sheet)
+# helpers/strava_gpx.py (v3 - single zip with subfolders)
 import io
 import re
 import time
@@ -134,10 +134,10 @@ def norm_surface(v: str) -> Optional[str]:
     if "road" in v:
         return "Road"
     if "trail" in v or "mixed" in v:
-        return "Trail"  # Mixed -> Trail (as agreed)
+        return "Trail"  # Mixed -> Trail
     return None
 
-def add_row_to_bucket(row: dict, cols: dict, fixed_group: str, buckets: Dict[str, List[BucketedRoute]], errors: List[str]):
+def add_row_to_bucket(row: dict, cols: dict, fixed_group: str, buckets: Dict[str, List[BucketedRoute]]):
     link_type = str(row.get(cols["link_type"], "")).strip().lower()
     if link_type != "strava route":
         return
@@ -163,9 +163,9 @@ def build_buckets_from_master(df: pd.DataFrame) -> Tuple[Dict[str, List[Bucketed
 
     for _, row in df.iterrows():
         # Route 1 -> 8k
-        add_row_to_bucket(row, ROUTE1_COLS, "8k", buckets, errors)
+        add_row_to_bucket(row, ROUTE1_COLS, "8k", buckets)
         # Route 2 -> 5k
-        add_row_to_bucket(row, ROUTE2_COLS, "5k", buckets, errors)
+        add_row_to_bucket(row, ROUTE2_COLS, "5k", buckets)
 
     return buckets, errors
 
@@ -179,8 +179,8 @@ def strava_export_gpx(route_id: str, token: str) -> bytes:
     r.raise_for_status()
     return r.content
 
-# ---------- Zipping with dedupe ----------
-def build_bucket_zips(buckets: Dict[str, List[BucketedRoute]], token: str):
+# ---------- Single zip with subfolders ----------
+def build_single_zip(buckets: Dict[str, List[BucketedRoute]], token: str):
     import zipfile
     import io as _io
 
@@ -206,17 +206,23 @@ def build_bucket_zips(buckets: Dict[str, List[BucketedRoute]], token: str):
             errors_by_route[rid] = str(e)
         progress.progress(idx / max(total, 1))
 
-    zips = {}
-    for bucket_name, blist in buckets.items():
-        bio = _io.BytesIO()
-        with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    bio = _io.BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Create subfolders and add files
+        for bucket_name, blist in buckets.items():
+            # Ensure folder entry is present
+            zf.writestr(bucket_name.rstrip("/") + "/", b"")
             for br in blist:
                 g = gpx_cache.get(br.route_id)
                 if not g:
                     errors_by_route[f"{bucket_name}:{br.route_id}"] = errors_by_route.get(br.route_id, "Unknown error")
                     continue
-                zf.writestr(f"strava_route_{br.route_id}.gpx", g)
-        zips[bucket_name] = bio.getvalue()
+                zf.writestr(f"{bucket_name}/strava_route_{br.route_id}.gpx", g)
+        # Optional manifest
+        manifest_lines = ["Buckets and counts:"]
+        for k, v in buckets.items():
+            manifest_lines.append(f"- {k}: {len(v)} routes")
+        zf.writestr("MANIFEST.txt", "\n".join(manifest_lines))
 
     status.write("Done.")
-    return zips, errors_by_route
+    return bio.getvalue(), errors_by_route

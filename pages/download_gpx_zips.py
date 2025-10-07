@@ -1,5 +1,5 @@
 
-# pages/download_gpx_zips.py (v2)
+# pages/download_gpx_zips.py (v3 - single zip)
 import streamlit as st
 import pandas as pd
 import urllib.parse
@@ -9,12 +9,12 @@ from helpers.strava_gpx import (
     capture_strava_token_from_query,
     load_master_schedule,
     build_buckets_from_master,
-    build_bucket_zips,
+    build_single_zip,
 )
 
-st.set_page_config(page_title="Download GPX Zips (Strava)", page_icon="📦", layout="wide")
-st.title("📦 Download GPX Zips — Strava routes from Schedule")
-st.caption("Build: v2025.10.07-GPXZIP-2 (Route1→8k, Route2→5k, Mixed→Trail)")
+st.set_page_config(page_title="Download GPX (Single Zip)", page_icon="📦", layout="wide")
+st.title("📦 Download GPX — Strava routes from Schedule (Single Zip)")
+st.caption("Build: v2025.10.07-GPXZIP-3 (One zip, subfolders; Route1→8k, Route2→5k, Mixed→Trail)")
 
 # Capture token if redirect back with ?code=
 capture_strava_token_from_query()
@@ -49,7 +49,7 @@ with top2:
 st.divider()
 
 st.subheader("1) Data source")
-st.write(f"Using shared Google Sheet **{SHEET_TAB}** from Spreadsheet ID **{STRAVA_SHEET_ID}** (same sheet the app uses).")
+st.write(f"Using shared Google Sheet **{SHEET_TAB}** from Spreadsheet ID **{STRAVA_SHEET_ID}**.")
 
 sched = load_master_schedule()
 if not isinstance(sched, pd.DataFrame) or sched.empty:
@@ -60,7 +60,7 @@ st.success(f"Loaded schedule with {len(sched)} rows.")
 with st.expander("Preview first 50 rows (for sanity check)"):
     st.dataframe(sched.head(50), use_container_width=True)
 
-st.subheader("2) Build buckets (Route 1 → 8k, Route 2 → 5k)")
+st.subheader("2) Build buckets (Route 1 → 8k, Route 2 → 5k, Mixed → Trail)")
 buckets, errs = build_buckets_from_master(sched)
 if errs:
     for e in errs:
@@ -72,9 +72,9 @@ st.write(counts)
 if not tok:
     st.stop()
 
-st.subheader("3) Download GPX and generate ZIPs")
-if st.button("Fetch GPX & build ZIPs", type="primary"):
-    zips, errmap = build_bucket_zips(buckets, tok)
+st.subheader("3) Download GPX and generate one ZIP (with subfolders)")
+if st.button("Fetch GPX & build single ZIP", type="primary"):
+    blob, errmap = build_single_zip(buckets, tok)
 
     if errmap:
         with st.expander("Errors (per route)", expanded=False):
@@ -82,15 +82,11 @@ if st.button("Fetch GPX & build ZIPs", type="primary"):
             err_rows = [{"route_id": k.split(":")[-1], "bucket": k.split(":")[0] if ":" in k else "", "error": v} for k, v in errmap.items()]
             st.dataframe(pd.DataFrame(err_rows))
 
-    for bucket_name, blob in zips.items():
-        if blob:
-            st.download_button(
-                label=f"Download {bucket_name}.zip",
-                data=blob,
-                file_name=f"{bucket_name.replace(' ', '_')}.zip",
-                mime="application/zip",
-            )
-        else:
-            st.info(f"No files for {bucket_name}")
+    st.download_button(
+        label="Download All_Routes_GPX.zip",
+        data=blob,
+        file_name="All_Routes_GPX.zip",
+        mime="application/zip",
+    )
 else:
-    st.info("Click the button to fetch GPX and build the ZIP files.")
+    st.info("Click the button to fetch GPX and build the ZIP file.")
