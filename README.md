@@ -1,30 +1,22 @@
 
-# Download GPX Zips — New Streamlit Page
+# Download GPX Zips — Fixed Columns & Shared Sheet (v2)
 
-This adds a new Streamlit page at `pages/download_gpx_zips.py` which:
-- Reuses your existing Strava OAuth (reads/writes `st.session_state["strava_token"]` and `["strava_athlete"]`).
-- Loads your Schedule (from your public Google Sheet or an uploaded Excel).
-- Extracts Strava Route IDs from URL or Source ID.
-- Groups rows into **Road 5k**, **Trail 5k**, **Road 8k**, **Trail 8k**.
-- Deduplicates downloads across the whole schedule.
-- Downloads each GPX via the Strava API and produces four ZIP files for download.
+This version is hard-wired to your shared Google Sheet:
 
-## Setup
+- **Spreadsheet ID:** `1ncT1NCbSnFsAokyFBkMWBVsk7yrJTiUfG0iBRxyUCTw`
+- **Sheet tab:** `Annual_Schedule_MASTER`
+- **Mappings:** Route 1 ⇒ **8k**, Route 2 ⇒ **5k**, **Mixed ⇒ Trail**
+- **Include only** rows where `Route X - Route Link Type` is `Strava Route`.
+- Route ID is taken from `Route X - Source ID` (preferred) or parsed from `Route X - Route Link (Source URL)`.
 
-1. Ensure Streamlit secrets contain:
-   - `STRAVA_CLIENT_ID`
-   - `STRAVA_CLIENT_SECRET`
-   - (optional) `STRAVA_REDIRECT_URI`
+### Files
+- `pages/download_gpx_zips.py`
+- `helpers/strava_gpx.py`
 
-2. Drop the two files into your app:
-   - `pages/download_gpx_zips.py`
-   - `helpers/strava_gpx.py`
+### Setup
+Add your Strava secrets to Streamlit:
+- `STRAVA_CLIENT_ID`
+- `STRAVA_CLIENT_SECRET`
+- optional: `STRAVA_REDIRECT_URI`
 
-3. Deploy/run. You can use either the *existing Strava OAuth page* or this page's **Connect with Strava** button.
-   Both will result in a token saved in `st.session_state["strava_token"]`.
-
-## Notes
-
-- Only public/accessible routes can be exported. Private routes require the authorized athlete to have access.
-- We avoid repeated downloads of the same route ID. If a route belongs to multiple buckets, the same GPX is reused when building zips.
-- Bucket detection is heuristic; if the app doesn't auto-detect, choose the correct columns in the UI.
+Use your existing OAuth page or click **Connect with Strava** on this page.
