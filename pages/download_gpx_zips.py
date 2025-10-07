@@ -1,5 +1,5 @@
 
-# pages/download_gpx_zips.py (v3 - single zip)
+# pages/download_gpx_zips.py (v4 - friendly names & single zip)
 import streamlit as st
 import pandas as pd
 import urllib.parse
@@ -13,8 +13,8 @@ from helpers.strava_gpx import (
 )
 
 st.set_page_config(page_title="Download GPX (Single Zip)", page_icon="📦", layout="wide")
-st.title("📦 Download GPX — Strava routes from Schedule (Single Zip)")
-st.caption("Build: v2025.10.07-GPXZIP-3 (One zip, subfolders; Route1→8k, Route2→5k, Mixed→Trail)")
+st.title("📦 Download GPX — Strava routes from Schedule (Single Zip, Friendly Names)")
+st.caption("Build: v2025.10.07-GPXZIP-4 (One zip, subfolders; Route1→8k, Route2→5k, Mixed→Trail; Names from C/M with 'RTR - ' prefix)")
 
 # Capture token if redirect back with ?code=
 capture_strava_token_from_query()
@@ -72,7 +72,7 @@ st.write(counts)
 if not tok:
     st.stop()
 
-st.subheader("3) Download GPX and generate one ZIP (with subfolders)")
+st.subheader("3) Download GPX and generate one ZIP (with subfolders & friendly names)")
 if st.button("Fetch GPX & build single ZIP", type="primary"):
     blob, errmap = build_single_zip(buckets, tok)
 
