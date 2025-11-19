@@ -604,6 +604,13 @@ r_pois = [None, None]
 notes_col = "Notes"
 meet_loc_col = None  # not in sheet; parsed from Notes
 
+# Route 3 (e.g. social walk / C25K) and optional On Tour map link
+route3_desc_col = "Route 3 description"
+route3_name_col = "Route 3 name"
+route3_dist_col = "Route 3 distance"
+route3_url_col  = "Route 3 URL"
+on_tour_map_col = "On tour meeting location map"
+
 # --- Parse dates as pure date ---
 d = pd.to_datetime(sched[date_col], errors="coerce", format="%Y-%m-%d %H:%M:%S")
 sched["_dateonly"] = d.dt.date
@@ -621,7 +628,15 @@ def _fmt(idx):
 idx_choice = st.selectbox("Date", options=opt_idx, format_func=_fmt, index=0 if opt_idx else None)
 if idx_choice is None:
     st.stop()
+
 row = future_rows.loc[idx_choice]
+
+# Toggle Jeffing option (some weeks there may be no Jeffing group, e.g. during C25K)
+show_jeffing = st.checkbox(
+    "Include Jeffing option in messages",
+    value=True,
+    help="Untick this if there will be no Jeffing group this week.",
+)
 
 # ----------------------------
 # Build route dicts (sheet)
@@ -647,7 +662,32 @@ def build_route_dict(side_idx: int) -> dict:
 routes = [build_route_dict(0), build_route_dict(1)]
 
 # Enrich from Strava + LocationIQ (prefer Strava distance)
+
 routes = [enrich_route_dict(r) for r in routes]
+
+# Optional Route 3 (e.g. social walk / C25K)
+route3 = None
+route3_desc = clean(row.get(route3_desc_col, ""))
+try:
+    route3_name = clean(row.get(route3_name_col, ""))
+    route3_url_raw = clean(row.get(route3_url_col, ""))
+    if route3_name or route3_url_raw or route3_desc:
+        route3_url = make_https(route3_url_raw)
+        route3_rid = route_id("", route3_url) if route3_url else ""
+        route3_dist_val = try_float(row.get(route3_dist_col, ""))
+        route3 = {
+            "name": route3_name or (route3_desc or "Route 3"),
+            "url": route3_url,
+            "rid": route3_rid,
+            "terrain": "",
+            "area": "",
+            "dist": route3_dist_val,
+            "elev": None,
+            "pois": "",
+        }
+        route3 = enrich_route_dict(route3)
+except Exception:
+    route3 = None
 
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
@@ -708,6 +748,77 @@ except Exception:
     pass
 
 
+
+# ----------------------------
+# Weather helper (Open-Meteo)
+# ----------------------------
+def get_weather_blurb_for_date(run_date):
+    """Return a short clothing suggestion based on forecast temp around 7pm.
+    Uses Open-Meteo with a fixed Radcliffe lat/lon; fails gracefully if anything goes wrong.
+    """
+    try:
+        from datetime import datetime as _dt
+        # Normalise run_date to a date object
+        try:
+            import pandas as _pd  # type: ignore
+        except Exception:
+            _pd = None
+        d = None
+        if _pd is not None and isinstance(run_date, (_pd.Timestamp,)):
+            d = run_date.date()
+        elif isinstance(run_date, (_dt,)):
+            d = run_date.date()
+        else:
+            s = str(run_date)[:10]
+            try:
+                d = _dt.strptime(s, "%Y-%m-%d").date()
+            except Exception:
+                return None
+        # Radcliffe approx coordinates
+        lat, lon = 53.561, -2.329
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "temperature_2m",
+            "timezone": "Europe/London",
+            "start_date": d.isoformat(),
+            "end_date": d.isoformat(),
+        }
+        resp = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=8)
+        if not resp.ok:
+            return None
+        data = resp.json()
+        hourly = data.get("hourly", {})
+        times = hourly.get("time") or []
+        temps = hourly.get("temperature_2m") or []
+        if not times or not temps:
+            return None
+        target = _dt.combine(d, _dt.min.time()).replace(hour=19)
+        best_temp = None
+        best_diff = None
+        for t_str, temp in zip(times, temps):
+            try:
+                t_dt = _dt.fromisoformat(t_str)
+            except Exception:
+                continue
+            diff = abs((t_dt - target).total_seconds())
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_temp = temp
+        if best_temp is None:
+            return None
+        try:
+            t = float(best_temp)
+        except Exception:
+            return None
+        if t <= 5:
+            return "It’s looking cold around session time – layer up, hats and gloves recommended ❄️"
+        if t >= 22:
+            return "It’s going to be a warm one – bring water and dress for the heat ☀️"
+        return None
+    except Exception:
+        return None
+
 # ----------------------------
 # Compose message
 # ----------------------------
@@ -721,6 +832,15 @@ if not meet_loc:
     if m: meet_loc = m.group(1).strip()
 if not meet_loc:
     meet_loc = get_cfg("MEET_LOC_DEFAULT", "Radcliffe Market")
+
+
+meet_loc_stripped = meet_loc.strip()
+is_on_tour_meeting = meet_loc_stripped.lower() not in ("", "radcliffe market")
+try:
+    meet_map_url = clean(row.get(on_tour_map_col, ""))
+except Exception:
+    meet_map_url = ""
+nice_meet_loc = meet_loc_stripped or get_cfg("MEET_LOC_DEFAULT", "Radcliffe Market")
 
 date_str = format_day_month_uk(pd.to_datetime(row["_dateonly"]))
 time_line = "🕖 We set off at 7:00pm"
@@ -1005,7 +1125,7 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
     return "We’ll be running " + ", ".join(parts) + "."
 
 def route_blurb(label, r: dict) -> str:
-    if isinstance(r.get("dist"), (int,float)):
+    if isinstance(r.get("dist"), (int, float)):
         dist_txt = f"{r['dist']:.1f} km"
     elif r.get("dist") is not None:
         dist_txt = f"{r['dist']} km"
@@ -1015,7 +1135,7 @@ def route_blurb(label, r: dict) -> str:
     url = r.get("url") or (f"https://www.strava.com/routes/{r.get('rid')}" if r.get("rid") else "")
     name = r.get("name") or "Route"
     line1 = f"• {label} – {name}" + (f": {url}" if url else "")
-    elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int,float)) else ""
+    elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int, float)) else ""
     line2 = f"  {dist_txt}{elev_part} – {desc}"
     highlights = ""
     if r.get("pois"):
@@ -1024,17 +1144,19 @@ def route_blurb(label, r: dict) -> str:
             parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
         if parts:
             # dedupe and keep first 3
-            seen=set(); uniq=[]
+            seen = set()
+            uniq = []
             for p in parts:
-                k=p.lower()
+                k = p.lower()
                 if k not in seen:
-                    seen.add(k); uniq.append(p)
+                    seen.add(k)
+                    uniq.append(p)
             highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
     lines = [line1, line2]
-    sentence = describe_turns_sentence(r, label)
-    if sentence:
-        lines.append("  " + sentence)
+    if highlights:
+        lines.append("  " + highlights)
     return "\n".join(lines)
+
 
 # Order long/short by distance if available
 def sort_with_labels(r1, r2):
@@ -1044,30 +1166,142 @@ def sort_with_labels(r1, r2):
 
 labeled = sort_with_labels(routes[0], routes[1])
 
-lines = []
-lines.append(f"🏃 This Thursday — {date_str}")
-lines.append("")
-lines.append(meeting_line)
-lines.append(time_line)
-lines.append("")
-lines.append("🛣️ This week we’ve got two route options to choose from:")
-lines.append(route_blurb(labeled[0][0], labeled[0][1]))
-lines.append(route_blurb(labeled[1][0], labeled[1][1]))
-lines.append("")
-if is_road:
-    lines.append(SAFETY_NOTE)
+# Deterministic random seed based on date so text varies week-to-week but stays stable per date
+date_key = str(row.get("_dateonly") or "")
+seed = int(hashlib.sha1(date_key.encode("utf-8")).hexdigest()[:8], 16) if date_key else random.randint(0, 2**32 - 1)
+rng_email = random.Random(seed)
+rng_fb = random.Random(seed + 1)
+rng_wa = random.Random(seed + 2)
+
+# Common intro variants
+intro_variants = [
+    "We’ve got 3 routes lined up and 4 great options this week:",
+    "This Thursday we’ve got three routes planned and four great options to choose from:",
+    "Three routes, four great options – something for everyone this Thursday:",
+]
+
+def build_route_option_lines(include_jeffing: bool) -> list[str]:
+    opts: list[str] = []
+    label3 = (route3_desc or "Walk").strip() or "Walk"
+    emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
+    opts.append(f"{emoji3} {label3}")
+    if include_jeffing:
+        opts.append("🏃 Jeffing")
+    opts.append("🏃 5k")
+    opts.append("🏃‍♀️ 8k")
+    return opts
+
+def build_common_meeting_lines(include_map: bool = True) -> list[str]:
+    lines: list[str] = []
+    if is_on_tour_meeting:
+        lines.append(f"📍 This week we’re On Tour – meeting at {nice_meet_loc}.")
+    else:
+        lines.append(f"📍 Meeting at: {nice_meet_loc}.")
+    if include_map and meet_map_url:
+        lines.append(f"🗺️ Meeting point map: {meet_map_url}")
+    lines.append(time_line)
+    return lines
+
+def build_route_detail_lines() -> list[str]:
+    lines: list[str] = []
     lines.append("")
+    lines.append("Route details:")
+    # Route 3 (walk/C25K) first if present
+    label3 = (route3_desc or "Walk").strip() or "Walk"
+    if route3 is not None:
+        lines.append(route_blurb(label3, route3))
+    # Then 8k and 5k
+    lines.append(route_blurb(labeled[0][0], labeled[0][1]))
+    lines.append(route_blurb(labeled[1][0], labeled[1][1]))
+    return lines
 
-lines.append("📲 Book now:")
-lines.append("https://groups.runtogether.co.uk/RunTogetherRadcliffe/Runs")
-lines.append("❌ Can’t make it? Cancel at least 1 hour before:")
-lines.append("https://groups.runtogether.co.uk/My/BookedRuns")
-lines.append("")
-lines.append("👟 Grab your shoes, bring your smiles – see you Thursday!")
-lines.append("")
-lines.append("*RunTogether Radcliffe – This Thursday!*")
+def build_safety_and_weather_lines() -> list[str]:
+    lines: list[str] = []
+    if is_road:
+        lines.append(SAFETY_NOTE)
+    weather_line = get_weather_blurb_for_date(row.get("_dateonly"))
+    if weather_line:
+        lines.append(weather_line)
+    return lines
 
-post_text = "\n".join(lines)
+BOOKING_BLOCK = [
+    "📍 Route links for this week (and future runs) are available at this link:",
+    "https://runtogetherradcliffe.github.io/weeklyschedule",
+    "",
+    "📲 Quickest way to book & manage your place: use the RunTogether Runner app on your phone.",
+    "· Apple iOS app: https://apps.apple.com/gb/app/runtogether-runner/id1447488812",
+    "· Android app: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share",
+    "",
+    "💻 Prefer the website? You can also book via:",
+    "· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching",
+    "To cancel you need to use this link:",
+    "· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses",
+    "",
+    "ℹ️ Cancellation info:",
+    "· On the website you can cancel until midnight the day before.",
+    "· On the app you can cancel up to 1 hour before the session.",
+]
 
-st.subheader("Composed message")
-st.text_area("Copy/paste to socials", value=post_text, height=420)
+# ----------------------------
+# Email text
+# ----------------------------
+email_lines: list[str] = []
+email_lines.append("Hi everyone 👋")
+email_lines.append("")
+email_lines.append(intro_variants[rng_email.randint(0, len(intro_variants) - 1)])
+email_lines.extend(build_route_option_lines(show_jeffing))
+email_lines.append("")
+email_lines.extend(build_common_meeting_lines(include_map=True))
+email_lines.append("")
+email_lines.extend(BOOKING_BLOCK)
+email_lines.extend(build_route_detail_lines())
+email_lines.append("")
+email_lines.extend(build_safety_and_weather_lines())
+email_lines.append("")
+email_lines.append("⏰ We set off at 7:00pm — grab your spot and come run/walk with us! 🧡")
+email_text = "\n".join(email_lines)
+
+# ----------------------------
+# Facebook post
+# ----------------------------
+fb_lines: list[str] = []
+fb_lines.append(f"RunTogether Radcliffe – this Thursday {date_str}")
+fb_lines.append("")
+fb_lines.append(intro_variants[rng_fb.randint(0, len(intro_variants) - 1)])
+fb_lines.extend(build_route_option_lines(show_jeffing))
+fb_lines.append("")
+fb_lines.extend(build_common_meeting_lines(include_map=True))
+fb_lines.append("")
+fb_lines.extend(BOOKING_BLOCK)
+fb_lines.extend(build_route_detail_lines())
+fb_lines.append("")
+fb_lines.extend(build_safety_and_weather_lines())
+fb_lines.append("")
+fb_lines.append("Tag a friend who might like to join us and share the running love! 🧡")
+facebook_text = "\n".join(fb_lines)
+
+# ----------------------------
+# WhatsApp message
+# ----------------------------
+wa_lines: list[str] = []
+wa_lines.append(f"*RunTogether Radcliffe – Thursday {date_str}*")
+wa_lines.append("")
+wa_lines.append(intro_variants[rng_wa.randint(0, len(intro_variants) - 1)])
+for opt in build_route_option_lines(show_jeffing):
+    wa_lines.append(f"- {opt}")
+wa_lines.append("")
+for line in build_common_meeting_lines(include_map=True):
+    wa_lines.append(line)
+wa_lines.append("")
+wa_lines.append("Route links for this week (and future runs):")
+wa_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
+wa_lines.append("")
+wa_lines.extend(build_safety_and_weather_lines())
+wa_lines.append("")
+wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minutes early.*")
+wa_text = "\n".join(wa_lines)
+
+st.subheader("Generated messages")
+st.text_area("Email text", value=email_text, height=320)
+st.text_area("Facebook post", value=facebook_text, height=320)
+st.text_area("WhatsApp message", value=wa_text, height=320)
