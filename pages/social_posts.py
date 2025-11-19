@@ -38,6 +38,17 @@ def clean(s):
         return ""
     return s
 
+
+def make_https(url):
+    """Ensure any non-empty URL uses https:// scheme."""
+    if not url:
+        return ""
+    u = str(url).strip()
+    if u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    return u
+
+
 def ordinal(n:int)->str:
     n=int(n)
     return f"{n}{'th' if 11<=n%100<=13 else {1:'st',2:'nd',3:'rd'}.get(n%10,'th')}"
