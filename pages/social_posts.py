@@ -982,11 +982,19 @@ rng_wa = random.Random(seed + 2)
 
 # Common intro variants
 intro_variants = [
-    "We’ve got 3 routes lined up and 4 great options this week:",
-    "This Thursday we’ve got three routes planned and four great options to choose from:",
-    "Three routes, four great options – something for everyone this Thursday:",
+    "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
+    "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
+    "{num_routes} routes, {num_options} great options – something for everyone this Thursday:",
 ]
 
+def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
+    """Build an intro line that reflects the actual number of routes/options."""
+    # Base routes: 5k and 8k
+    num_routes = 2 + (1 if route3 is not None else 0)
+    # Options: 5k + 8k + optional Jeffing + optional walk/C25K (Route 3)
+    num_options = 2 + (1 if include_jeffing else 0) + (1 if route3 is not None else 0)
+    tmpl = intro_variants[rng.randint(0, len(intro_variants) - 1)]
+    return tmpl.format(num_routes=num_routes, num_options=num_options)
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
     """Build the list of session options for the intro line.
 
@@ -1094,7 +1102,7 @@ def build_email_booking_block() -> list[str]:
 # Email text
 # ----------------------------
 email_lines: list[str] = []
-email_lines.append(intro_variants[rng_email.randint(0, len(intro_variants) - 1)])
+email_lines.append(build_intro_line(rng_email, show_jeffing))
 email_lines.extend(build_route_option_lines(show_jeffing))
 email_lines.append("")
 email_lines.extend(build_common_meeting_lines(include_map=True))
@@ -1166,7 +1174,7 @@ def make_email_html(email_text: str) -> str:
 fb_lines: list[str] = []
 fb_lines.append(f"RunTogether Radcliffe – this Thursday {date_str}")
 fb_lines.append("")
-fb_lines.append(intro_variants[rng_fb.randint(0, len(intro_variants) - 1)])
+fb_lines.append(build_intro_line(rng_fb, show_jeffing))
 fb_lines.extend(build_route_option_lines(show_jeffing))
 fb_lines.append("")
 fb_lines.extend(build_common_meeting_lines(include_map=True))
@@ -1185,7 +1193,7 @@ facebook_text = "\n".join(fb_lines)
 wa_lines: list[str] = []
 wa_lines.append(f"*RunTogether Radcliffe – Thursday {date_str}*")
 wa_lines.append("")
-wa_lines.append(intro_variants[rng_wa.randint(0, len(intro_variants) - 1)])
+wa_lines.append(build_intro_line(rng_wa, show_jeffing))
 for opt in build_route_option_lines(show_jeffing):
     wa_lines.append(f"- {opt}")
 wa_lines.append("")
@@ -1224,7 +1232,7 @@ components.html(f"""
     {email_html}
   </div>
 </div>
-""", height=500)
+""", height=900)
 
 st.download_button(
     "Download email as HTML",
