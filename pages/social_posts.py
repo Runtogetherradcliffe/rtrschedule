@@ -13,6 +13,7 @@ import requests
 import os
 import hashlib
 import streamlit as st
+import streamlit.components.v1 as components
 from radar import radar_match_steps
 from roads_integration import must_include_from_sheet
 
@@ -987,14 +988,27 @@ intro_variants = [
 ]
 
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
+    """Build the list of session options for the intro line.
+
+    Only include the walk/C25K option if Route 3 is actually defined
+    (i.e. there is a non-empty description). Jeffing, 5k and 8k are
+    then added as usual.
+    """
     opts: list[str] = []
-    label3 = (route3_desc or "Walk").strip() or "Walk"
-    emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
-    opts.append(f"{emoji3} {label3}")
+
+    has_route3 = route3 is not None and bool((route3_desc or "").strip())
+    if has_route3:
+        label3 = (route3_desc or "Walk").strip() or "Walk"
+        emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
+        opts.append(f"{emoji3} {label3}")
+
     if include_jeffing:
         opts.append("🏃 Jeffing")
+
+    # 5k and 8k options are always available
     opts.append("🏃 5k")
     opts.append("🏃‍♀️ 8k")
+
     return opts
 
 def build_common_meeting_lines(include_map: bool = True) -> list[str]:
@@ -1187,14 +1201,34 @@ wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minut
 wa_text = "\n".join(wa_lines)
 
 st.subheader("Email (copy from here)")
-try:
-    st.markdown(make_email_html(email_text), unsafe_allow_html=True)
-except Exception:
-    st.write("Preview not available")
+email_html = make_email_html(email_text)
+components.html(f"""
+<div>
+  <button onclick="(function() {{
+      try {{
+          const node = document.getElementById('email-html');
+          if (!node) return;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('copy');
+      }} catch (e) {{
+          console.error(e);
+      }}
+  }})()" style="margin-bottom:0.5rem;">
+    Copy email
+  </button>
+  <div id="email-html" style="white-space:pre-wrap; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+    {email_html}
+  </div>
+</div>
+""", height=500)
 
 st.download_button(
     "Download email as HTML",
-    data=make_email_html(email_text),
+    data=email_html,
     file_name="rtr_thursday_email.html",
     mime="text/html",
 )
