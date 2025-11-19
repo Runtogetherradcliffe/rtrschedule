@@ -38,6 +38,15 @@ def clean(s):
         return ""
     return s
 
+def try_float(x, default=None):
+    """Safely convert a value to float, returning default if conversion fails."""
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
 
 def make_https(url):
     """Ensure any non-empty URL uses https:// scheme."""
