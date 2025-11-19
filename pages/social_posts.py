@@ -30,23 +30,13 @@ def get_cfg(key, default=None):
         return default
 
 def clean(s):
-    return (str(s).strip()) if s is not None else ""
-
-def try_float(x):
-    try:
-        if x is None or x == "":
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-def make_https(url):
-    if not url:
+    if s is None:
         return ""
-    u = str(url).strip()
-    if u.startswith("http://"):
-        u = "https://" + u[len("http://"):]
-    return u
+    s = str(s).strip()
+    # Treat common pandas null markers as empty
+    if s.lower() in ("nan", "nat"):
+        return ""
+    return s
 
 def ordinal(n:int)->str:
     n=int(n)
@@ -1070,8 +1060,6 @@ def build_email_booking_block() -> list[str]:
 # Email text
 # ----------------------------
 email_lines: list[str] = []
-email_lines.append("Hi everyone 👋")
-email_lines.append("")
 email_lines.append(intro_variants[rng_email.randint(0, len(intro_variants) - 1)])
 email_lines.extend(build_route_option_lines(show_jeffing))
 email_lines.append("")
@@ -1178,14 +1166,18 @@ wa_lines.append("")
 wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minutes early.*")
 wa_text = "\n".join(wa_lines)
 
-st.subheader("Email (plain text)")
-st.text_area("Email text", value=email_text, height=320)
-
-st.subheader("Email (rich preview – copy from here)")
+st.subheader("Email (copy from here)")
 try:
     st.markdown(make_email_html(email_text), unsafe_allow_html=True)
 except Exception:
     st.write("Preview not available")
+
+st.download_button(
+    "Download email as HTML",
+    data=make_email_html(email_text),
+    file_name="rtr_thursday_email.html",
+    mime="text/html",
+)
 
 st.subheader("Facebook post")
 st.text_area("Facebook post", value=facebook_text, height=320)
