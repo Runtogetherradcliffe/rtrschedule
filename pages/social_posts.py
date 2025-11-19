@@ -285,202 +285,13 @@ def get_locationiq_key(*, debug: bool = False):
 
 
 def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None, debug: bool = False):
-    # POI lookups disabled for this version – we no longer query external APIs for route highlights.
-    pois_list = []
-    rep = {"rid": rid, "final_pois": [], "disabled": True}
-    return pois_list, rep
     """
-    Fast POI finder for social post (v24.15):
-      - Budgeted runtime (~2.5s)
-      - Sample up to 24 points along line; reverse at zooms 17,16
-      - Prioritise towpath/canal/woods/viaduct/bridge/river and later-route features
-      - Penalise generic starts like "Outwood Gate"/"Outwood"/supermarket names
+    POI highlighting disabled for social posts – we no longer look up on-route features.
+    Kept as a lightweight stub for compatibility.
     """
-    import time
-
-    t0 = time.perf_counter()
-    BUDGET = 2.5  # seconds soft budget
-
-    base_pref = _get_secret("LOCATIONIQ_BASE") or "us1"
-    base_order = []
-    for b in (base_pref, "us1", "eu1", "ap1"):
-        if b not in base_order:
-            base_order.append(b)
-
-    key, key_src = get_locationiq_key(debug=True)
-    if not key:
-        return ([], {"error": "no_api_key", "api_key_source": key_src}) if debug else []
-
-    pts = sample_points or _sample_points(polyline, max_pts=24)
-    if not pts:
-        return ([], {"error": "no_points", "api_key_source": key_src}) if debug else []
-
-    ONROUTE_KEYS = [
-        "road","footway","pedestrian","path","cycleway","bridleway","trail","steps",
-        "bridge","river","waterway","canal","park","leisure","natural"
-    ]
-    PRIORITY_WORDS = ["towpath","canal","river","wood","woods","forest","viaduct","bridge","trail","park","nature","reserve"]
-    ROAD_WORDS = ["road","lane","street","way","drive","avenue","rd","ln","st"]
-    BANLIST = {s.lower() for s in [
-        "outwood gate","outwood","lidl","radcliffe market","pilkington way","dale street","bank field street",
-        "asda pay desk","radcliffe bus station","phoenix way","sion street","highmeadow"
-    ]}
-
-    if hasattr(st, "cache_data"):
-        @st.cache_data(show_spinner=False, ttl=21600)
-        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
-            try:
-                r = requests.get(
-                    f"https://{base}.locationiq.com/v1/reverse",
-                    params={
-                        "key": key,
-                        "lat": f"{lat:.6f}",
-                        "lon": f"{lon:.6f}",
-                        "format": "json",
-                        "normalizeaddress": 1,
-                        "addressdetails": 1,
-                        "namedetails": 1,
-                        "extratags": 1,
-                        "zoom": zoom,
-                    },
-                    timeout=8,
-                )
-                if not r.ok:
-                    return None
-                return r.json()
-            except Exception:
-                return None
-    else:
-        def _liq_reverse_cached(base: str, key: str, lat: float, lon: float, zoom: int):
-            try:
-                r = requests.get(
-                    f"https://{base}.locationiq.com/v1/reverse",
-                    params={
-                        "key": key,
-                        "lat": f"{lat:.6f}",
-                        "lon": f"{lon:.6f}",
-                        "format": "json",
-                        "normalizeaddress": 1,
-                        "addressdetails": 1,
-                        "namedetails": 1,
-                        "extratags": 1,
-                        "zoom": zoom,
-                    },
-                    timeout=8,
-                )
-                if not r.ok:
-                    return None
-                return r.json()
-            except Exception:
-                return None
-
-    def extract_names(payload: dict) -> list[str]:
-        out = []
-        addr = payload.get("address") or {}
-        namedetails = payload.get("namedetails") or {}
-        disp = payload.get("display_name") or ""
-        klass = (payload.get("class") or "").lower()
-        typ = (payload.get("type") or "").lower()
-        xtra = payload.get("extratags") or {}
-
-        if klass in ("waterway","natural","leisure"):
-            if typ in ("canal","river","stream","wood","forest","park","nature_reserve","common","towpath"):
-                n0 = (namedetails.get("name") or xtra.get("name") or xtra.get("official_name")
-                      or (disp.split(",")[0].strip() if disp else ""))
-                if n0 and n0.lower() != "unnamed road":
-                    out.append(n0)
-
-        for k in ONROUTE_KEYS:
-            v = addr.get(k)
-            if v and v.strip() and v.lower() != "unnamed road":
-                out.append(v.strip())
-
-        nm = namedetails.get("name") or xtra.get("name") or xtra.get("official_name")
-        if nm and nm.strip():
-            out.append(nm.strip())
-
-        if disp:
-            first = disp.split(",")[0].strip()
-            if first and first.lower() != "unnamed road":
-                out.append(first)
-        return out
-
-    names_pos = []  # (name, idx)
-    hits = 0
-    calls = 0
-    N = max(1, len(pts)-1)
-
-    def rank_and_select(pairs):
-        best_pos = {}
-        for s, i in pairs:
-            k = s.strip().lower()
-            if not k or k == "unnamed road":
-                continue
-            if k not in best_pos:
-                best_pos[k] = (s.strip(), i)
-
-        scored = []
-        for k, (s, i) in best_pos.items():
-            l = k
-            score = 50.0
-            if ("towpath" in l) or ("canal" in l): score -= 30
-            if ("wood" in l) or ("woods" in l) or ("forest" in l): score -= 24
-            if ("viaduct" in l) or ("bridge" in l): score -= 20
-            if any(w in l for w in ["trail","river","park","nature","reserve"]): score -= 15
-            if l in BANLIST: score += 25
-            if any(w in l for w in ROAD_WORDS) and not any(w in l for w in PRIORITY_WORDS): score += 8
-            later = (i / N) if N else 0.0
-            score -= 18.0 * later
-            scored.append((score, i, s))
-
-        scored.sort()
-        return [s for (score, i, s) in scored[:3]]
-
-    for idx, (lat, lon) in enumerate(pts):
-        for b in base_order:
-            for z in (17, 16):
-                if (time.perf_counter() - t0) > BUDGET:
-                    break
-                calls += 1
-                payload = _liq_reverse_cached(b, key, lat, lon, z)
-                if payload:
-                    cands = extract_names(payload)
-                    if cands:
-                        for c in cands:
-                            names_pos.append((c, idx))
-                        hits += 1
-                        current = rank_and_select(names_pos)
-                        if any(("towpath" in x.lower()) or ("canal" in x.lower()) for x in current) and len(current) >= 3:
-                            pois = current
-                            rep = {
-                                "rid": rid,
-                                "points_considered": len(pts),
-                                "reverse_calls": calls,
-                                "points_hit": hits,
-                                "raw_names": [n for n,_ in names_pos][:40],
-                                "final_pois": pois,
-                                "bases": base_order,
-                                "api_key_source": key_src,
-                                "early_stop": True
-                            }
-                            return (pois, rep) if debug else pois
-        if (time.perf_counter() - t0) > BUDGET:
-            break
-
-    pois = rank_and_select(names_pos)
-    rep = {
-        "rid": rid,
-        "points_considered": len(pts),
-        "reverse_calls": calls,
-        "points_hit": hits,
-        "raw_names": [n for n,_ in names_pos][:40],
-        "final_pois": pois,
-        "bases": base_order,
-        "api_key_source": key_src,
-        "early_stop": False
-    }
-    return (pois, rep) if debug else pois
-
+    if debug:
+        return [], {"note": "poi_lookup_disabled"}
+    return []
 
 def enrich_route_dict(r: dict) -> dict:
     """Return a new dict with dist/elev/pois populated from Strava + LocationIQ.
@@ -1129,7 +940,6 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
     return "We’ll be running " + ", ".join(parts) + "."
 
 def route_blurb(label, r: dict) -> str:
-    """Format a simple two-line blurb for a route without hilliness adjectives or POIs."""
     if isinstance(r.get("dist"), (int, float)):
         dist_txt = f"{r['dist']:.1f} km"
     elif r.get("dist") is not None:
@@ -1139,12 +949,12 @@ def route_blurb(label, r: dict) -> str:
     url = r.get("url") or (f"https://www.strava.com/routes/{r.get('rid')}" if r.get("rid") else "")
     name = r.get("name") or "Route"
     line1 = f"• {label} – {name}" + (f": {url}" if url else "")
-    elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int, float)) else ""
+    elev_part = ""
+    if isinstance(r.get("elev"), (int, float)):
+        elev_part = f" with {r['elev']:.0f}m of elevation"
     line2 = f"  {dist_txt}{elev_part}"
     return "\n".join([line1, line2])
 
-
-# Order long/short by distance if available
 def sort_with_labels(r1, r2):
     def d(r): return r["dist"] if r["dist"] is not None else -1
     a, b = (r1, r2) if d(r1) >= d(r2) else (r2, r1)
@@ -1178,21 +988,16 @@ def build_route_option_lines(include_jeffing: bool) -> list[str]:
     return opts
 
 def build_common_meeting_lines(include_map: bool = True) -> list[str]:
-    """Lines describing where (and when) we meet, plus map link when On Tour."""
     lines: list[str] = []
     if is_on_tour_meeting:
-        # On Tour: show location and map link
         lines.append(f"📍 This week we’re On Tour – meeting at {nice_meet_loc} at 7pm")
         if include_map and meet_map_url:
             lines.append(f"🗺️ Meeting point map: {meet_map_url}")
     else:
-        # Radcliffe Market (or default): no map link needed
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
     return lines
 
-
 def build_route_detail_lines() -> list[str]:
-    """Routes section for the messages, matching the desired email layout."""
     lines: list[str] = []
     lines.append("This week’s routes")
     lines.append("")
@@ -1200,36 +1005,39 @@ def build_route_detail_lines() -> list[str]:
     label3 = (route3_desc or "Walk").strip() or "Walk"
     if route3 is not None:
         lines.append(route_blurb(label3, route3))
-    # Then 8k and 5k
-    lines.append(route_blurb(labeled[0][0], labeled[0][1]))
-    lines.append(route_blurb(labeled[1][0], labeled[1][1]))
+        lines.append("")
+    # Then 8k and 5k from labeled list
+    for label, r in labeled:
+        lines.append(route_blurb(label, r))
+        lines.append("")
+    # Trim trailing blank lines
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.append("")
+    lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
+    lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
     return lines
 
-
 def build_safety_and_weather_lines() -> list[str]:
-    """Combine lights/hi-viz note with weather advice where possible."""
-    lines: list[str] = []
+    """Combine safety and weather guidance into a single friendly paragraph where possible."""
     safety = SAFETY_NOTE if is_road else ""
     weather_line = get_weather_blurb_for_date(row.get("_dateonly"))
     if safety and weather_line:
+        # Lowercase first letter of weather line so it flows after "Also"
         wl = weather_line
-        if wl:
+        if wl and wl[0].isupper():
             wl = wl[0].lower() + wl[1:]
-        lines.append(f"{safety} Also {wl}")
+        return [f"{safety} Also {wl}"]
     elif safety:
-        lines.append(safety)
+        return [safety]
     elif weather_line:
-        lines.append(weather_line)
-    return lines
-
+        return [weather_line]
+    return []
 
 BOOKING_BLOCK = [
-    "📍 Route links for this week (and future runs) are available at this link:",
-    "https://runtogetherradcliffe.github.io/weeklyschedule",
-    "",
-    "📲 Quickest way to book & manage your place: use the RunTogether Runner app on your phone.",
-    "· Apple iOS app: https://apps.apple.com/gb/app/runtogether-runner/id1447488812",
-    "· Android app: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share",
+    "📲 The easiest way to manage your bookings is via the RunTogether Runner app on your phone:",
+    "· Download the Apple iOS app: https://apps.apple.com/gb/app/runtogether-runner/id1447488812",
+    "· Download the Android app: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share",
     "",
     "💻 Prefer the website? You can also book via:",
     "· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching",
@@ -1240,6 +1048,25 @@ BOOKING_BLOCK = [
     "· On the website you can cancel until midnight the day before.",
     "· On the app you can cancel up to 1 hour before the session.",
 ]
+
+def build_email_booking_block() -> list[str]:
+    """Email-specific booking block with bold header and embedded app links."""
+    lines: list[str] = []
+    lines.append("**How to book**")
+    lines.append("")
+    lines.append("📲 The easiest way to manage your bookings is via the RunTogether Runner app on your phone:")
+    lines.append("· Download the Apple iOS app [here](https://apps.apple.com/gb/app/runtogether-runner/id1447488812)")
+    lines.append("· Download the Android app [here](https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share)")
+    lines.append("")
+    lines.append("💻 Prefer the website? You can also book via:")
+    lines.append("· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching")
+    lines.append("To cancel you need to use this link:")
+    lines.append("· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses")
+    lines.append("")
+    lines.append("ℹ️ Cancellation info:")
+    lines.append("· On the website you can cancel until midnight the day before.")
+    lines.append("· On the app you can cancel up to 1 hour before the session.")
+    return lines
 
 # ----------------------------
 # Email text
@@ -1252,37 +1079,18 @@ email_lines.extend(build_route_option_lines(show_jeffing))
 email_lines.append("")
 email_lines.extend(build_common_meeting_lines(include_map=True))
 email_lines.append("")
-# Routes section
-email_lines.extend(build_route_detail_lines())
+detail_lines = build_route_detail_lines()
+if detail_lines and detail_lines[0].strip().lower().startswith("this week"):
+    detail_lines[0] = f"**{detail_lines[0]}**"
+email_lines.extend(detail_lines)
 email_lines.append("")
-# Upcoming schedule link
-email_lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
-email_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
+email_lines.extend(build_email_booking_block())
 email_lines.append("")
-# Booking section
-email_lines.append("How to book")
-email_lines.append("")
-email_lines.append("📲 Quickest way to book & manage your place: use the RunTogether Runner app on your phone.")
-email_lines.append("· Apple iOS app: https://apps.apple.com/gb/app/runtogether-runner/id1447488812")
-email_lines.append("· Android app: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share")
-email_lines.append("")
-email_lines.append("💻 Prefer the website? You can also book via:")
-email_lines.append("· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching")
-email_lines.append("To cancel you need to use this link:")
-email_lines.append("· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses")
-email_lines.append("")
-email_lines.append("ℹ️ Cancellation info:")
-email_lines.append("· On the website you can cancel until midnight the day before.")
-email_lines.append("· On the app you can cancel up to 1 hour before the session.")
-email_lines.append("")
-# Safety / weather info
-email_lines.append("Additional information")
-email_lines.append("")
+email_lines.append("**Additional information**")
 email_lines.extend(build_safety_and_weather_lines())
 email_lines.append("")
 email_lines.append("Grab your spot and come run/walk with us! 🧡")
 email_text = "\n".join(email_lines)
-
 
 # ----------------------------
 # Facebook post
