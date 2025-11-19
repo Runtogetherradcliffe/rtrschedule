@@ -1050,13 +1050,11 @@ BOOKING_BLOCK = [
 ]
 
 def build_email_booking_block() -> list[str]:
-    """Email-specific booking block with bold header and embedded app links."""
+    """Email-specific booking block for the plain-text email version."""
     lines: list[str] = []
-    lines.append("**How to book**")
-    lines.append("")
     lines.append("📲 The easiest way to manage your bookings is via the RunTogether Runner app on your phone:")
-    lines.append("· Download the Apple iOS app [here](https://apps.apple.com/gb/app/runtogether-runner/id1447488812)")
-    lines.append("· Download the Android app [here](https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share)")
+    lines.append("· Download the Apple iOS app here: https://apps.apple.com/gb/app/runtogether-runner/id1447488812")
+    lines.append("· Download the Android app here: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share")
     lines.append("")
     lines.append("💻 Prefer the website? You can also book via:")
     lines.append("· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching")
@@ -1080,17 +1078,65 @@ email_lines.append("")
 email_lines.extend(build_common_meeting_lines(include_map=True))
 email_lines.append("")
 detail_lines = build_route_detail_lines()
-if detail_lines and detail_lines[0].strip().lower().startswith("this week"):
-    detail_lines[0] = f"**{detail_lines[0]}**"
 email_lines.extend(detail_lines)
+email_lines.append("")
+email_lines.append("How to book")
 email_lines.append("")
 email_lines.extend(build_email_booking_block())
 email_lines.append("")
-email_lines.append("**Additional information**")
+email_lines.append("Additional information")
+email_lines.append("")
 email_lines.extend(build_safety_and_weather_lines())
 email_lines.append("")
 email_lines.append("Grab your spot and come run/walk with us! 🧡")
 email_text = "\n".join(email_lines)
+
+def make_email_html(email_text: str) -> str:
+    """Convert the plain email text into HTML with bold section headers and embedded app links.
+    This is used to render a rich preview that can be copy–pasted into an email editor.
+    """
+    import html as _html
+    import re as _re
+
+    lines = email_text.split("\n")
+    html_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Bold section headings
+        if stripped in {"This week’s routes", "This week's routes"}:
+            html_lines.append("<b>This week’s routes</b>")
+            continue
+        if stripped == "How to book":
+            html_lines.append("<b>How to book</b>")
+            continue
+        if stripped == "Additional information":
+            html_lines.append("<b>Additional information</b>")
+            continue
+
+        # App download lines: embed links on "here"
+        m_ios = _re.match(r"(.*Download the Apple iOS app) here: (https?://\S+)", stripped)
+        if m_ios:
+            prefix, url = m_ios.group(1), m_ios.group(2)
+            html_lines.append(
+                f"{_html.escape(prefix)} <a href=\"{_html.escape(url, quote=True)}\">here</a>"
+            )
+            continue
+
+        m_and = _re.match(r"(.*Download the Android app) here: (https?://\S+)", stripped)
+        if m_and:
+            prefix, url = m_and.group(1), m_and.group(2)
+            html_lines.append(
+                f"{_html.escape(prefix)} <a href=\"{_html.escape(url, quote=True)}\">here</a>"
+            )
+            continue
+
+        # Default: escape as normal text
+        html_lines.append(_html.escape(line))
+
+    # Join with <br> so line breaks are preserved
+    return "<br>".join(html_lines)
 
 # ----------------------------
 # Facebook post
@@ -1132,7 +1178,17 @@ wa_lines.append("")
 wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minutes early.*")
 wa_text = "\n".join(wa_lines)
 
-st.subheader("Generated messages")
+st.subheader("Email (plain text)")
 st.text_area("Email text", value=email_text, height=320)
+
+st.subheader("Email (rich preview – copy from here)")
+try:
+    st.markdown(make_email_html(email_text), unsafe_allow_html=True)
+except Exception:
+    st.write("Preview not available")
+
+st.subheader("Facebook post")
 st.text_area("Facebook post", value=facebook_text, height=320)
+
+st.subheader("WhatsApp message")
 st.text_area("WhatsApp message", value=wa_text, height=320)
