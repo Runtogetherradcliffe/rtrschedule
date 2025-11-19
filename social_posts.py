@@ -29,6 +29,15 @@ def get_cfg(key, default=None):
     except Exception:
         return default
 
+def try_float(x, default=None):
+    """Safely convert a value to float, returning default if conversion fails."""
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
 def clean(s):
     if s is None:
         return ""
