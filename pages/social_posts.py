@@ -285,6 +285,10 @@ def get_locationiq_key(*, debug: bool = False):
 
 
 def locationiq_pois(polyline=None, sample_points=None, *, rid: str | None = None, debug: bool = False):
+    # POI lookups disabled for this version – we no longer query external APIs for route highlights.
+    pois_list = []
+    rep = {"rid": rid, "final_pois": [], "disabled": True}
+    return pois_list, rep
     """
     Fast POI finder for social post (v24.15):
       - Budgeted runtime (~2.5s)
@@ -1125,37 +1129,19 @@ def describe_turns_sentence(route_dict: dict, label: str | None = None, *, max_s
     return "We’ll be running " + ", ".join(parts) + "."
 
 def route_blurb(label, r: dict) -> str:
+    """Format a simple two-line blurb for a route without hilliness adjectives or POIs."""
     if isinstance(r.get("dist"), (int, float)):
         dist_txt = f"{r['dist']:.1f} km"
     elif r.get("dist") is not None:
         dist_txt = f"{r['dist']} km"
     else:
         dist_txt = "? km"
-    desc = hilliness_blurb(r.get("dist"), r.get("elev"))
     url = r.get("url") or (f"https://www.strava.com/routes/{r.get('rid')}" if r.get("rid") else "")
     name = r.get("name") or "Route"
     line1 = f"• {label} – {name}" + (f": {url}" if url else "")
     elev_part = f" with {r['elev']:.0f}m of elevation" if isinstance(r.get("elev"), (int, float)) else ""
-    line2 = f"  {dist_txt}{elev_part} – {desc}"
-    highlights = ""
-    if r.get("pois"):
-        parts = []
-        for ch in str(r["pois"]).split("|"):
-            parts.extend([p.strip() for p in re.split(r"[;,]", ch) if p.strip()])
-        if parts:
-            # dedupe and keep first 3
-            seen = set()
-            uniq = []
-            for p in parts:
-                k = p.lower()
-                if k not in seen:
-                    seen.add(k)
-                    uniq.append(p)
-            highlights = "🏞️ Highlights: " + ", ".join(uniq[:3])
-    lines = [line1, line2]
-    if highlights:
-        lines.append("  " + highlights)
-    return "\n".join(lines)
+    line2 = f"  {dist_txt}{elev_part}"
+    return "\n".join([line1, line2])
 
 
 # Order long/short by distance if available
@@ -1192,20 +1178,24 @@ def build_route_option_lines(include_jeffing: bool) -> list[str]:
     return opts
 
 def build_common_meeting_lines(include_map: bool = True) -> list[str]:
+    """Lines describing where (and when) we meet, plus map link when On Tour."""
     lines: list[str] = []
     if is_on_tour_meeting:
-        lines.append(f"📍 This week we’re On Tour – meeting at {nice_meet_loc}.")
+        # On Tour: show location and map link
+        lines.append(f"📍 This week we’re On Tour – meeting at {nice_meet_loc} at 7pm")
+        if include_map and meet_map_url:
+            lines.append(f"🗺️ Meeting point map: {meet_map_url}")
     else:
-        lines.append(f"📍 Meeting at: {nice_meet_loc}.")
-    if include_map and meet_map_url:
-        lines.append(f"🗺️ Meeting point map: {meet_map_url}")
-    lines.append(time_line)
+        # Radcliffe Market (or default): no map link needed
+        lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
     return lines
 
+
 def build_route_detail_lines() -> list[str]:
+    """Routes section for the messages, matching the desired email layout."""
     lines: list[str] = []
+    lines.append("This week’s routes")
     lines.append("")
-    lines.append("Route details:")
     # Route 3 (walk/C25K) first if present
     label3 = (route3_desc or "Walk").strip() or "Walk"
     if route3 is not None:
@@ -1215,14 +1205,23 @@ def build_route_detail_lines() -> list[str]:
     lines.append(route_blurb(labeled[1][0], labeled[1][1]))
     return lines
 
+
 def build_safety_and_weather_lines() -> list[str]:
+    """Combine lights/hi-viz note with weather advice where possible."""
     lines: list[str] = []
-    if is_road:
-        lines.append(SAFETY_NOTE)
+    safety = SAFETY_NOTE if is_road else ""
     weather_line = get_weather_blurb_for_date(row.get("_dateonly"))
-    if weather_line:
+    if safety and weather_line:
+        wl = weather_line
+        if wl:
+            wl = wl[0].lower() + wl[1:]
+        lines.append(f"{safety} Also {wl}")
+    elif safety:
+        lines.append(safety)
+    elif weather_line:
         lines.append(weather_line)
     return lines
+
 
 BOOKING_BLOCK = [
     "📍 Route links for this week (and future runs) are available at this link:",
@@ -1253,13 +1252,37 @@ email_lines.extend(build_route_option_lines(show_jeffing))
 email_lines.append("")
 email_lines.extend(build_common_meeting_lines(include_map=True))
 email_lines.append("")
-email_lines.extend(BOOKING_BLOCK)
+# Routes section
 email_lines.extend(build_route_detail_lines())
+email_lines.append("")
+# Upcoming schedule link
+email_lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
+email_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
+email_lines.append("")
+# Booking section
+email_lines.append("How to book")
+email_lines.append("")
+email_lines.append("📲 Quickest way to book & manage your place: use the RunTogether Runner app on your phone.")
+email_lines.append("· Apple iOS app: https://apps.apple.com/gb/app/runtogether-runner/id1447488812")
+email_lines.append("· Android app: https://play.google.com/store/apps/details?id=com.sportlabs.android.runner&pcampaignid=web_share")
+email_lines.append("")
+email_lines.append("💻 Prefer the website? You can also book via:")
+email_lines.append("· https://clubspark.englandathletics.org/RunTogetherRadcliffe/Coaching")
+email_lines.append("To cancel you need to use this link:")
+email_lines.append("· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses")
+email_lines.append("")
+email_lines.append("ℹ️ Cancellation info:")
+email_lines.append("· On the website you can cancel until midnight the day before.")
+email_lines.append("· On the app you can cancel up to 1 hour before the session.")
+email_lines.append("")
+# Safety / weather info
+email_lines.append("Additional information")
 email_lines.append("")
 email_lines.extend(build_safety_and_weather_lines())
 email_lines.append("")
-email_lines.append("⏰ We set off at 7:00pm — grab your spot and come run/walk with us! 🧡")
+email_lines.append("Grab your spot and come run/walk with us! 🧡")
 email_text = "\n".join(email_lines)
+
 
 # ----------------------------
 # Facebook post
