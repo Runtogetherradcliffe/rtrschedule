@@ -985,8 +985,8 @@ intro_variants = [
     "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
     "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
     "{num_routes} routes, {num_options} great options – something for everyone this Thursday:",
-    "Fancy joining us this week? We’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
-    “Come and join us on Thursday for a chatty run, we’ve got {num_routes} routes and {num_options} options to pick from:",
+    "Fancy a run or walk? We’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
+    "Whether you’re chasing a PB or fancy a chatty one, we’ve got {num_routes} routes and {num_options} options to pick from:",
 ]
 
 closing_variants_email = [
