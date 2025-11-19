@@ -985,6 +985,26 @@ intro_variants = [
     "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
     "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
     "{num_routes} routes, {num_options} great options – something for everyone this Thursday:",
+    "Fancy a run or walk? We’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
+    "Whether you’re chasing a PB or fancy a chatty one, we’ve got {num_routes} routes and {num_options} options to pick from:",
+]
+
+closing_variants_email = [
+    "Grab your spot and come run/walk with us! 🧡",
+    "Fancy joining us this week? Book your spot and come along! 🧡",
+    "We’d love to see you there – grab a place and join the fun! 🧡",
+]
+
+closing_variants_fb = [
+    "Tag a friend who might like to join us and share the running love! 🧡",
+    "Know someone who’d enjoy this? Tag them and bring them along! 🧡",
+    "New faces always welcome – tag a friend and spread the word! 🧡",
+]
+
+closing_variants_wa = [
+    "*We set off at 7:00pm – please book on and arrive a few minutes early.*",
+    "*We set off at 7:00pm – book your spot and come a little early to say hi.*",
+    "*We set off at 7:00pm – grab a place and aim to arrive a few minutes before.*",
 ]
 
 def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
@@ -1118,7 +1138,7 @@ email_lines.append("Additional information")
 email_lines.append("")
 email_lines.extend(build_safety_and_weather_lines())
 email_lines.append("")
-email_lines.append("Grab your spot and come run/walk with us! 🧡")
+email_lines.append(closing_variants_email[rng_email.randint(0, len(closing_variants_email) - 1)])
 email_text = "\n".join(email_lines)
 
 def make_email_html(email_text: str) -> str:
@@ -1162,8 +1182,8 @@ def make_email_html(email_text: str) -> str:
             )
             continue
 
-        # Default: escape as normal text
-        html_lines.append(_html.escape(line))
+        # Default: escape as normal text (strip leading spaces to avoid odd indentation)
+        html_lines.append(_html.escape(line.lstrip()))
 
     # Join with <br> so line breaks are preserved
     return "<br>".join(html_lines)
@@ -1184,7 +1204,7 @@ fb_lines.extend(build_route_detail_lines())
 fb_lines.append("")
 fb_lines.extend(build_safety_and_weather_lines())
 fb_lines.append("")
-fb_lines.append("Tag a friend who might like to join us and share the running love! 🧡")
+fb_lines.append(closing_variants_fb[rng_fb.randint(0, len(closing_variants_fb) - 1)])
 facebook_text = "\n".join(fb_lines)
 
 # ----------------------------
@@ -1205,7 +1225,7 @@ wa_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
 wa_lines.append("")
 wa_lines.extend(build_safety_and_weather_lines())
 wa_lines.append("")
-wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minutes early.*")
+wa_lines.append(closing_variants_wa[rng_wa.randint(0, len(closing_variants_wa) - 1)])
 wa_text = "\n".join(wa_lines)
 
 st.subheader("Email (copy from here)")
