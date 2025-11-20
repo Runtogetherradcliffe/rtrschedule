@@ -987,7 +987,55 @@ intro_variants = [
     "{num_routes} routes, {num_options} great options – something for everyone this Thursday:",
     "Fancy joining us this week? We’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
     "Come and join us on Thursday for a chatty run, we’ve got {num_routes} routes and {num_options} options to pick from:",
+    "Your Thursday evening is sorted – {num_routes} routes and {num_options} options waiting for you:",
+    "We’ve planned another great Thursday meetup with {num_routes} routes and {num_options} options to suit how you’re feeling:",
+    "From gentle chats to stretch-your-legs runs, we’ve got {num_routes} routes and {num_options} options this week:",
+    "Looking for some midweek miles and smiles? We’ve lined up {num_routes} routes and {num_options} options:",
+    "Once again we’ve got {num_routes} routes and {num_options} options ready – just book on and join the fun:",
 ]
+
+# Extra weather-aware intro pools; these get mixed in when we have a forecast
+nice_weather_intros = [
+    "Looks like a decent evening for it – we’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
+    "With the weather playing nicely, it’s a great week to join us for {num_routes} routes and {num_options} options:",
+    "Perfect excuse to get outside – {num_routes} routes and {num_options} friendly options waiting for you this Thursday:",
+]
+
+wet_weather_intros = [
+    "It might be a bit soggy out there, but we’ll be braving the elements with {num_routes} routes and {num_options} options – come splash through the puddles with us:",
+    "Rain on the forecast? All the more reason to join us – {num_routes} routes and {num_options} options to keep things fun whatever the weather:",
+    "Grab your waterproofs – we’ve still got {num_routes} routes and {num_options} options lined up for a proper Thursday night outing:",
+]
+
+cold_weather_intros = [
+    "Chilly evening ahead, but we’ll soon warm up with {num_routes} routes and {num_options} options to choose from:",
+    "Layer up and join us this Thursday – {num_routes} routes and {num_options} cosy, chatty options to keep you moving:",
+    "Gloves and hats at the ready! We’ve planned {num_routes} routes and {num_options} options for a crisp Thursday night:",
+]
+
+windy_weather_intros = [
+    "It could be a bit breezy, but we’ll lean into it together – {num_routes} routes and {num_options} options this Thursday:",
+    "Wind in the hair, smiles all round – we’ve got {num_routes} routes and {num_options} options lined up:",
+]
+
+def classify_weather_for_intro(weather_summary):
+    """Roughly categorise the weather based on a short text summary.
+
+    Returns one of: 'nice', 'wet', 'cold', 'windy', or 'generic'.
+    """
+    text = (weather_summary or "").lower()
+    if not text:
+        return "generic"
+    if any(w in text for w in ["rain", "showers", "drizzle", "sleet", "downpour", "wet"]):
+        return "wet"
+    if any(w in text for w in ["snow", "frost", "freezing", "cold", "chilly", "icy"]):
+        return "cold"
+    if any(w in text for w in ["wind", "breezy", "gust", "gale", "gusty"]):
+        return "windy"
+    if any(w in text for w in ["sunny", "sunshine", "clear", "bright", "warm"]):
+        return "nice"
+    return "generic"
+
 
 closing_variants_email = [
     "Grab your spot and come run/walk with us! 🧡",
@@ -1008,13 +1056,36 @@ closing_variants_wa = [
 ]
 
 def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
-    """Build an intro line that reflects the actual number of routes/options."""
+    """Build an intro line that reflects the actual number of routes/options and, where possible, the likely weather."""
     # Base routes: 5k and 8k
     num_routes = 2 + (1 if route3 is not None else 0)
     # Options: 5k + 8k + optional Jeffing + optional walk/C25K (Route 3)
     num_options = 2 + (1 if include_jeffing else 0) + (1 if route3 is not None else 0)
-    tmpl = intro_variants[rng.randint(0, len(intro_variants) - 1)]
+
+    # Try to get a short weather summary for the run date using the existing helper.
+    weather_summary = None
+    try:
+        run_date = row.get("_dateonly") if isinstance(row, dict) or hasattr(row, "get") else None
+        if run_date is not None:
+            weather_summary = get_weather_blurb_for_date(run_date)
+    except Exception:
+        weather_summary = None
+
+    category = classify_weather_for_intro(weather_summary)
+    if category == "nice":
+        pool = nice_weather_intros + intro_variants
+    elif category == "wet":
+        pool = wet_weather_intros + intro_variants
+    elif category == "cold":
+        pool = cold_weather_intros + intro_variants
+    elif category == "windy":
+        pool = windy_weather_intros + intro_variants
+    else:
+        pool = intro_variants
+
+    tmpl = rng.choice(pool)
     return tmpl.format(num_routes=num_routes, num_options=num_options)
+
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
     """Build the list of session options for the intro line.
 
