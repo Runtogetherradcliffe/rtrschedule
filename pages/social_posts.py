@@ -515,6 +515,27 @@ try:
 except Exception:
     route3 = None
 
+# Identify special "out and back" (OAB) routes where all groups follow the same route.
+OAB_ROUTE_IDS = {
+    "3184108628138553660",
+    "3184108921197884234",
+    "3210328480860101850",
+}
+
+def is_oab_route(route):
+    """Return True if this route is one of the known out-and-back routes, or its name contains 'OAB'."""
+    if not route:
+        return False
+    rid = str(route.get("rid") or "").strip()
+    name = str(route.get("name") or "").lower()
+    if rid in OAB_ROUTE_IDS:
+        return True
+    return "oab" in name
+
+IS_OAB_NIGHT = any(
+    is_oab_route(r) for r in routes + ([route3] if route3 else [])
+)
+
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
     is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
@@ -981,6 +1002,14 @@ rng_fb = random.Random(seed + 1)
 rng_wa = random.Random(seed + 2)
 
 # Common intro variants
+OAB_INTRO = (
+    "This week all groups are doing an out and back route. "
+    "Simply follow the route for 20 minutes and then turn around and come back. "
+    "If you want to go a bit further, you can optionally run for 25 minutes before turning round. "
+    "The idea of an OAB is to maintain an even pace on both the out and back. "
+    "If you want a bit more of a challenge, try doing the return leg slightly faster."
+)
+
 intro_variants = [
     "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
     "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
@@ -1057,6 +1086,10 @@ closing_variants_wa = [
 
 def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
     """Build an intro line that reflects the actual number of routes/options and, where possible, the likely weather."""
+    # Special case: out-and-back nights use a dedicated intro.
+    if IS_OAB_NIGHT:
+        return OAB_INTRO
+
     # Base routes: 5k and 8k
     num_routes = 2 + (1 if route3 is not None else 0)
     # Options: 5k + 8k + optional Jeffing + optional walk/C25K (Route 3)
