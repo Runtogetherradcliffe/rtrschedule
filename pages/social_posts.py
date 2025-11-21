@@ -1135,19 +1135,23 @@ def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
     """Build the list of session options for the intro line.
 
-    If this is an out-and-back night (all groups on the same route), we skip the
-    individual session options and just show the OAB explanation and route details.
-    """
-    if IS_OAB_NIGHT:
-        return []
-
     Only include the walk/C25K option if Route 3 is actually defined
     (i.e. there is a non-empty description). Jeffing, 5k and 8k are
     then added as usual.
+
+    If this is an out-and-back night (all groups on the same route), we skip the
+    individual session options and just show the OAB explanation and route details.
+
     """
+
+    # On out-and-back nights we don't show separate session options in the intro.
+    if IS_OAB_NIGHT:
+        return []
+
     opts: list[str] = []
 
     has_route3 = route3 is not None and bool((route3_desc or "").strip())
+
     if has_route3:
         label3 = (route3_desc or "Walk").strip() or "Walk"
         emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
@@ -1156,8 +1160,8 @@ def build_route_option_lines(include_jeffing: bool) -> list[str]:
     if include_jeffing:
         opts.append("🏃 Jeffing")
 
-    # 5k and 8k options are always available
     opts.append("🏃 5k")
+
     opts.append("🏃‍♀️ 8k")
 
     return opts
