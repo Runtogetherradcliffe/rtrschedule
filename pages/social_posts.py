@@ -515,27 +515,45 @@ try:
 except Exception:
     route3 = None
 
-# Identify special "out and back" (OAB) routes where all groups follow the same route.
+
+# --- Out-and-back (OAB) route detection ---
 OAB_ROUTE_IDS = {
     "3184108628138553660",
     "3184108921197884234",
     "3210328480860101850",
 }
 
-def is_oab_route(route):
-    """Return True if this route is one of the known out-and-back routes, or its name contains 'OAB'."""
-    if not route:
+def is_oab_route(r) -> bool:
+    """Return True if this route is one of the known out-and-back routes or its name contains 'OAB'."""
+    if not r:
         return False
-    rid = str(route.get("rid") or "").strip()
-    name = str(route.get("name") or "").lower()
-    if rid in OAB_ROUTE_IDS:
+    rid = str(r.get("rid") or "").strip()
+    name = str(r.get("name") or "").lower()
+    if rid and rid in OAB_ROUTE_IDS:
         return True
-    return "oab" in name
+    if "oab" in name:
+        return True
+    return False
 
-IS_OAB_NIGHT = any(
-    is_oab_route(r) for r in routes + ([route3] if route3 else [])
+# Collect any OAB routes for tonight
+_oab_candidates = []
+for _r in routes:
+    if is_oab_route(_r):
+        _oab_candidates.append(_r)
+if route3 is not None and is_oab_route(route3):
+    _oab_candidates.append(route3)
+
+IS_OAB_NIGHT: bool = bool(_oab_candidates)
+PRIMARY_OAB_ROUTE = _oab_candidates[0] if _oab_candidates else None
+
+# Special intro text for OAB nights
+OAB_INTRO = (
+    "This week all groups are doing an out and back route. "
+    "Simply follow the route for 20 minutes and then turn around and come back. "
+    "If you want to go a bit further, you can optionally run for 25 minutes before turning round. "
+    "The idea of an OAB is to maintain an even pace on both the out and back. "
+    "If you want a bit more of a challenge, try doing the return leg slightly faster."
 )
-
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
     is_road = any(((r.get("terrain") or "").lower().startswith("road") or "road" in (r.get("terrain") or "").lower()) for r in routes)
@@ -1002,14 +1020,6 @@ rng_fb = random.Random(seed + 1)
 rng_wa = random.Random(seed + 2)
 
 # Common intro variants
-OAB_INTRO = (
-    "This week all groups are doing an out and back route. "
-    "Simply follow the route for 20 minutes and then turn around and come back. "
-    "If you want to go a bit further, you can optionally run for 25 minutes before turning round. "
-    "The idea of an OAB is to maintain an even pace on both the out and back. "
-    "If you want a bit more of a challenge, try doing the return leg slightly faster."
-)
-
 intro_variants = [
     "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
     "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
@@ -1084,9 +1094,13 @@ closing_variants_wa = [
     "*We set off at 7:00pm – grab a place and aim to arrive a few minutes before.*",
 ]
 
+
 def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
-    """Build an intro line that reflects the actual number of routes/options and, where possible, the likely weather."""
-    # Special case: out-and-back nights use a dedicated intro.
+    """Build an intro line that reflects the actual number of routes/options and, where possible, the likely weather.
+
+    On out-and-back (OAB) nights, this returns a dedicated explanation instead.
+    """
+    # Special case: out-and-back night – use fixed explanatory intro
     if IS_OAB_NIGHT:
         return OAB_INTRO
 
@@ -1105,6 +1119,7 @@ def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
         weather_summary = None
 
     category = classify_weather_for_intro(weather_summary)
+
     if category == "nice":
         pool = nice_weather_intros + intro_variants
     elif category == "wet":
@@ -1122,10 +1137,13 @@ def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
     """Build the list of session options for the intro line.
 
-    Only include the walk/C25K option if Route 3 is actually defined
-    (i.e. there is a non-empty description). Jeffing, 5k and 8k are
-    then added as usual.
+    On out-and-back (OAB) nights we don’t list separate options, as all
+    groups follow the same route – the intro text explains how it works.
     """
+    # For OAB nights, skip the per-option summary entirely.
+    if IS_OAB_NIGHT:
+        return []
+
     opts: list[str] = []
 
     has_route3 = route3 is not None and bool((route3_desc or "").strip())
@@ -1153,19 +1171,32 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
     return lines
 
+
 def build_route_detail_lines() -> list[str]:
+    """Build the detailed route section for email / Facebook.
+
+    On OAB nights this collapses to a single shared route for all groups.
+    """
     lines: list[str] = []
-    lines.append("This week’s routes")
-    lines.append("")
-    # Route 3 (walk/C25K) first if present
-    label3 = (route3_desc or "Walk").strip() or "Walk"
-    if route3 is not None:
-        lines.append(route_blurb(label3, route3))
+
+    if IS_OAB_NIGHT and PRIMARY_OAB_ROUTE is not None:
+        # Single shared route for everyone
+        lines.append("This week’s route")
         lines.append("")
-    # Then 8k and 5k from labeled list
-    for label, r in labeled:
-        lines.append(route_blurb(label, r))
+        lines.append(route_blurb("All groups", PRIMARY_OAB_ROUTE))
+    else:
+        lines.append("This week’s routes")
         lines.append("")
+        # Route 3 (walk/C25K) first if present
+        label3 = (route3_desc or "Walk").strip() or "Walk"
+        if route3 is not None:
+            lines.append(route_blurb(label3, route3))
+            lines.append("")
+        # Then 8k and 5k from labeled list
+        for label, r in labeled:
+            lines.append(route_blurb(label, r))
+            lines.append("")
+
     # Trim trailing blank lines
     while lines and not lines[-1].strip():
         lines.pop()
@@ -1311,6 +1342,7 @@ fb_lines.append("")
 fb_lines.append(closing_variants_fb[rng_fb.randint(0, len(closing_variants_fb) - 1)])
 facebook_text = "\n".join(fb_lines)
 
+
 # ----------------------------
 # WhatsApp message
 # ----------------------------
@@ -1318,13 +1350,26 @@ wa_lines: list[str] = []
 wa_lines.append(f"*RunTogether Radcliffe – Thursday {date_str}*")
 wa_lines.append("")
 wa_lines.append(build_intro_line(rng_wa, show_jeffing))
+
+# Session options (skipped on OAB nights because everyone is on the same route)
 for opt in build_route_option_lines(show_jeffing):
     wa_lines.append(f"- {opt}")
+
 wa_lines.append("")
 for line in build_common_meeting_lines(include_map=True):
     wa_lines.append(line)
 wa_lines.append("")
-wa_lines.append("Route links for this week (and future runs):")
+
+if IS_OAB_NIGHT and PRIMARY_OAB_ROUTE is not None:
+    # Make the WhatsApp message explicitly aware of the shared OAB route
+    wa_lines.append("This week’s route:")
+    wa_lines.append("")
+    wa_lines.append(route_blurb("All groups", PRIMARY_OAB_ROUTE))
+    wa_lines.append("")
+    wa_lines.append("Other routes and future weeks are on our schedule page:")
+else:
+    wa_lines.append("Route links for this week (and future runs):")
+
 wa_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
 wa_lines.append("")
 wa_lines.extend(build_safety_and_weather_lines())
