@@ -13,6 +13,7 @@ import requests
 import os
 import hashlib
 import streamlit as st
+import streamlit.components.v1 as components
 from radar import radar_match_steps
 from roads_integration import must_include_from_sheet
 
@@ -29,15 +30,6 @@ def get_cfg(key, default=None):
     except Exception:
         return default
 
-def try_float(x, default=None):
-    """Safely convert a value to float, returning default if conversion fails."""
-    try:
-        if x is None or x == "":
-            return default
-        return float(x)
-    except (TypeError, ValueError):
-        return default
-
 def clean(s):
     if s is None:
         return ""
@@ -46,6 +38,15 @@ def clean(s):
     if s.lower() in ("nan", "nat"):
         return ""
     return s
+
+def try_float(x, default=None):
+    """Safely convert a value to float, returning default if conversion fails."""
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
 
 
 def make_https(url):
@@ -426,6 +427,10 @@ r_dist    = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]
 # Elevation/POI columns not present in your sheet
 r_elev = [None, None]
 r_pois = [None, None]
+
+# Global flag for post-run social (from Notes)
+has_after_social = False
+
 notes_col = "Notes"
 meet_loc_col = None  # not in sheet; parsed from Notes
 
@@ -513,6 +518,42 @@ try:
         route3 = enrich_route_dict(route3)
 except Exception:
     route3 = None
+
+# --- Detect out-and-back ("OAB") nights where all groups follow the same route ---
+
+OAB_ROUTE_IDS = {
+    "3184108628138553660",
+    "3184108921197884234",
+    "3210328480860101850",
+}
+
+
+def is_oab_route(route: dict) -> bool:
+    """Return True if the given route is one of the known out-and-back routes or its name contains 'OAB'."""
+    if not route:
+        return False
+    rid = str(route.get("rid") or "").strip()
+    name = str(route.get("name") or "").lower()
+    if rid and rid in OAB_ROUTE_IDS:
+        return True
+    if "oab" in name:
+        return True
+    return False
+
+
+IS_OAB_NIGHT = False
+PRIMARY_OAB_ROUTE = None
+
+try:
+    all_routes = [r for r in routes if r] + ([route3] if route3 else [])
+    for r in all_routes:
+        if is_oab_route(r):
+            IS_OAB_NIGHT = True
+            PRIMARY_OAB_ROUTE = r
+            break
+except Exception:
+    IS_OAB_NIGHT = False
+    PRIMARY_OAB_ROUTE = None
 
 # Determine if tonight is a Road run (from row/routing terrain)
 try:
@@ -980,21 +1021,153 @@ rng_fb = random.Random(seed + 1)
 rng_wa = random.Random(seed + 2)
 
 # Common intro variants
+OAB_INTRO = ("This week all groups are doing an out and back route. "
+"Simply follow the route for 20 minutes and then turn around and come back. "
+"If you want to go a bit further, you can optionally run for 25 minutes before turning round. "
+"The idea of an OAB is to maintain an even pace on both the out and back. "
+"If you want a bit more of a challenge, try doing the return leg slightly faster."
+)
+
 intro_variants = [
-    "We’ve got 3 routes lined up and 4 great options this week:",
-    "This Thursday we’ve got three routes planned and four great options to choose from:",
-    "Three routes, four great options – something for everyone this Thursday:",
+    "We’ve got {num_routes} routes lined up and {num_options} great options this week:",
+    "This Thursday we’ve got {num_routes} routes planned and {num_options} great options to choose from:",
+    "{num_routes} routes, {num_options} great options – something for everyone this Thursday:",
+    "Fancy joining us this week? We’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
+    "Come and join us on Thursday for a chatty run, we’ve got {num_routes} routes and {num_options} options to pick from:",
+    "Your Thursday evening is sorted – {num_routes} routes and {num_options} options waiting for you:",
+    "We’ve planned another great Thursday meetup with {num_routes} routes and {num_options} options to suit how you’re feeling:",
+    "From gentle chats to stretch-your-legs runs, we’ve got {num_routes} routes and {num_options} options this week:",
+    "Looking for some midweek miles and smiles? We’ve lined up {num_routes} routes and {num_options} options:",
+    "Once again we’ve got {num_routes} routes and {num_options} options ready – just book on and join the fun:",
 ]
 
+# Extra weather-aware intro pools; these get mixed in when we have a forecast
+nice_weather_intros = [
+    "Looks like a decent evening for it – we’ve planned {num_routes} routes and {num_options} options for you this Thursday:",
+    "With the weather playing nicely, it’s a great week to join us for {num_routes} routes and {num_options} options:",
+    "Perfect excuse to get outside – {num_routes} routes and {num_options} friendly options waiting for you this Thursday:",
+]
+
+wet_weather_intros = [
+    "It might be a bit soggy out there, but we’ll be braving the elements with {num_routes} routes and {num_options} options – come splash through the puddles with us:",
+    "Rain on the forecast? All the more reason to join us – {num_routes} routes and {num_options} options to keep things fun whatever the weather:",
+    "Grab your waterproofs – we’ve still got {num_routes} routes and {num_options} options lined up for a proper Thursday night outing:",
+]
+
+cold_weather_intros = [
+    "Chilly evening ahead, but we’ll soon warm up with {num_routes} routes and {num_options} options to choose from:",
+    "Layer up and join us this Thursday – {num_routes} routes and {num_options} cosy, chatty options to keep you moving:",
+    "Gloves and hats at the ready! We’ve planned {num_routes} routes and {num_options} options for a crisp Thursday night:",
+]
+
+windy_weather_intros = [
+    "It could be a bit breezy, but we’ll lean into it together – {num_routes} routes and {num_options} options this Thursday:",
+    "Wind in the hair, smiles all round – we’ve got {num_routes} routes and {num_options} options lined up:",
+]
+
+def classify_weather_for_intro(weather_summary):
+    """Roughly categorise the weather based on a short text summary.
+
+    Returns one of: 'nice', 'wet', 'cold', 'windy', or 'generic'.
+    """
+    text = (weather_summary or "").lower()
+    if not text:
+        return "generic"
+    if any(w in text for w in ["rain", "showers", "drizzle", "sleet", "downpour", "wet"]):
+        return "wet"
+    if any(w in text for w in ["snow", "frost", "freezing", "cold", "chilly", "icy"]):
+        return "cold"
+    if any(w in text for w in ["wind", "breezy", "gust", "gale", "gusty"]):
+        return "windy"
+    if any(w in text for w in ["sunny", "sunshine", "clear", "bright", "warm"]):
+        return "nice"
+    return "generic"
+
+
+closing_variants_email = [
+    "Grab your spot and come run/walk with us! 🧡",
+    "Fancy joining us this week? Book your spot and come along! 🧡",
+    "We’d love to see you there – grab a place and join the fun! 🧡",
+]
+
+closing_variants_fb = [
+    "Tag a friend who might like to join us and share the running love! 🧡",
+    "Know someone who’d enjoy this? Tag them and bring them along! 🧡",
+    "New faces always welcome – tag a friend and spread the word! 🧡",
+]
+
+closing_variants_wa = [
+    "*We set off at 7:00pm – please book on and arrive a few minutes early.*",
+    "*We set off at 7:00pm – book your spot and come a little early to say hi.*",
+    "*We set off at 7:00pm – grab a place and aim to arrive a few minutes before.*",
+]
+
+def build_intro_line(rng: random.Random, include_jeffing: bool) -> str:
+    """Build an intro line that reflects the actual number of routes/options and, where possible, the likely weather."""
+    # Special case: out-and-back nights use a dedicated intro.
+    if IS_OAB_NIGHT:
+        return OAB_INTRO
+    # Base routes: 5k and 8k
+    num_routes = 2 + (1 if route3 is not None else 0)
+    # Options: 5k + 8k + optional Jeffing + optional walk/C25K (Route 3)
+    num_options = 2 + (1 if include_jeffing else 0) + (1 if route3 is not None else 0)
+
+    # Try to get a short weather summary for the run date using the existing helper.
+    weather_summary = None
+    try:
+        run_date = row.get("_dateonly") if isinstance(row, dict) or hasattr(row, "get") else None
+        if run_date is not None:
+            weather_summary = get_weather_blurb_for_date(run_date)
+    except Exception:
+        weather_summary = None
+
+    category = classify_weather_for_intro(weather_summary)
+    if category == "nice":
+        pool = nice_weather_intros + intro_variants
+    elif category == "wet":
+        pool = wet_weather_intros + intro_variants
+    elif category == "cold":
+        pool = cold_weather_intros + intro_variants
+    elif category == "windy":
+        pool = windy_weather_intros + intro_variants
+    else:
+        pool = intro_variants
+
+    tmpl = rng.choice(pool)
+    return tmpl.format(num_routes=num_routes, num_options=num_options)
+
 def build_route_option_lines(include_jeffing: bool) -> list[str]:
+    """Build the list of session options for the intro line.
+
+    Only include the walk/C25K option if Route 3 is actually defined
+    (i.e. there is a non-empty description). Jeffing, 5k and 8k are
+    then added as usual.
+
+    If this is an out-and-back night (all groups on the same route), we skip the
+    individual session options and just show the OAB explanation and route details.
+
+    """
+
+    # On out-and-back nights we don't show separate session options in the intro.
+    if IS_OAB_NIGHT:
+        return []
+
     opts: list[str] = []
-    label3 = (route3_desc or "Walk").strip() or "Walk"
-    emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
-    opts.append(f"{emoji3} {label3}")
+
+    has_route3 = route3 is not None and bool((route3_desc or "").strip())
+
+    if has_route3:
+        label3 = (route3_desc or "Walk").strip() or "Walk"
+        emoji3 = "🚶" if "walk" in label3.lower() else "🏃"
+        opts.append(f"{emoji3} {label3}")
+
     if include_jeffing:
         opts.append("🏃 Jeffing")
+
     opts.append("🏃 5k")
+
     opts.append("🏃‍♀️ 8k")
+
     return opts
 
 def build_common_meeting_lines(include_map: bool = True) -> list[str]:
@@ -1005,27 +1178,8 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
             lines.append(f"🗺️ Meeting point map: {meet_map_url}")
     else:
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
-    return lines
-
-def build_route_detail_lines() -> list[str]:
-    lines: list[str] = []
-    lines.append("This week’s routes")
-    lines.append("")
-    # Route 3 (walk/C25K) first if present
-    label3 = (route3_desc or "Walk").strip() or "Walk"
-    if route3 is not None:
-        lines.append(route_blurb(label3, route3))
-        lines.append("")
-    # Then 8k and 5k from labeled list
-    for label, r in labeled:
-        lines.append(route_blurb(label, r))
-        lines.append("")
-    # Trim trailing blank lines
-    while lines and not lines[-1].strip():
-        lines.pop()
-    lines.append("")
-    lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
-    lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
+        if has_after_social:
+            lines.append("After the run we are having a social, please join us for drinks and a bite to eat if you can.")
     return lines
 
 def build_safety_and_weather_lines() -> list[str]:
@@ -1080,7 +1234,7 @@ def build_email_booking_block() -> list[str]:
 # Email text
 # ----------------------------
 email_lines: list[str] = []
-email_lines.append(intro_variants[rng_email.randint(0, len(intro_variants) - 1)])
+email_lines.append(build_intro_line(rng_email, show_jeffing))
 email_lines.extend(build_route_option_lines(show_jeffing))
 email_lines.append("")
 email_lines.extend(build_common_meeting_lines(include_map=True))
@@ -1096,7 +1250,7 @@ email_lines.append("Additional information")
 email_lines.append("")
 email_lines.extend(build_safety_and_weather_lines())
 email_lines.append("")
-email_lines.append("Grab your spot and come run/walk with us! 🧡")
+email_lines.append(closing_variants_email[rng_email.randint(0, len(closing_variants_email) - 1)])
 email_text = "\n".join(email_lines)
 
 def make_email_html(email_text: str) -> str:
@@ -1115,6 +1269,10 @@ def make_email_html(email_text: str) -> str:
         # Bold section headings
         if stripped in {"This week’s routes", "This week's routes"}:
             html_lines.append("<b>This week’s routes</b>")
+            continue
+        if stripped.startswith("This week’s route") or stripped.startswith("This week's route"):
+            # Handle singular 'route' heading, with or without a trailing colon
+            html_lines.append(f"<b>{_html.escape(stripped)}</b>")
             continue
         if stripped == "How to book":
             html_lines.append("<b>How to book</b>")
@@ -1140,8 +1298,8 @@ def make_email_html(email_text: str) -> str:
             )
             continue
 
-        # Default: escape as normal text
-        html_lines.append(_html.escape(line))
+        # Default: escape as normal text (strip leading spaces to avoid odd indentation)
+        html_lines.append(_html.escape(line.lstrip()))
 
     # Join with <br> so line breaks are preserved
     return "<br>".join(html_lines)
@@ -1152,7 +1310,7 @@ def make_email_html(email_text: str) -> str:
 fb_lines: list[str] = []
 fb_lines.append(f"RunTogether Radcliffe – this Thursday {date_str}")
 fb_lines.append("")
-fb_lines.append(intro_variants[rng_fb.randint(0, len(intro_variants) - 1)])
+fb_lines.append(build_intro_line(rng_fb, show_jeffing))
 fb_lines.extend(build_route_option_lines(show_jeffing))
 fb_lines.append("")
 fb_lines.extend(build_common_meeting_lines(include_map=True))
@@ -1162,7 +1320,7 @@ fb_lines.extend(build_route_detail_lines())
 fb_lines.append("")
 fb_lines.extend(build_safety_and_weather_lines())
 fb_lines.append("")
-fb_lines.append("Tag a friend who might like to join us and share the running love! 🧡")
+fb_lines.append(closing_variants_fb[rng_fb.randint(0, len(closing_variants_fb) - 1)])
 facebook_text = "\n".join(fb_lines)
 
 # ----------------------------
@@ -1171,7 +1329,7 @@ facebook_text = "\n".join(fb_lines)
 wa_lines: list[str] = []
 wa_lines.append(f"*RunTogether Radcliffe – Thursday {date_str}*")
 wa_lines.append("")
-wa_lines.append(intro_variants[rng_wa.randint(0, len(intro_variants) - 1)])
+wa_lines.append(build_intro_line(rng_wa, show_jeffing))
 for opt in build_route_option_lines(show_jeffing):
     wa_lines.append(f"- {opt}")
 wa_lines.append("")
@@ -1183,18 +1341,38 @@ wa_lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
 wa_lines.append("")
 wa_lines.extend(build_safety_and_weather_lines())
 wa_lines.append("")
-wa_lines.append("*We set off at 7:00pm – please book on and arrive a few minutes early.*")
+wa_lines.append(closing_variants_wa[rng_wa.randint(0, len(closing_variants_wa) - 1)])
 wa_text = "\n".join(wa_lines)
 
 st.subheader("Email (copy from here)")
-try:
-    st.markdown(make_email_html(email_text), unsafe_allow_html=True)
-except Exception:
-    st.write("Preview not available")
+email_html = make_email_html(email_text)
+components.html(f"""
+<div>
+  <button onclick="(function() {{
+      try {{
+          const node = document.getElementById('email-html');
+          if (!node) return;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('copy');
+      }} catch (e) {{
+          console.error(e);
+      }}
+  }})()" style="margin-bottom:0.5rem;">
+    Copy email
+  </button>
+  <div id="email-html" style="white-space:pre-wrap; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+    {email_html}
+  </div>
+</div>
+""", height=900)
 
 st.download_button(
     "Download email as HTML",
-    data=make_email_html(email_text),
+    data=email_html,
     file_name="rtr_thursday_email.html",
     mime="text/html",
 )
