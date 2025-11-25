@@ -427,6 +427,10 @@ r_dist    = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]
 # Elevation/POI columns not present in your sheet
 r_elev = [None, None]
 r_pois = [None, None]
+
+# Global flag for post-run social (from Notes)
+has_after_social = False
+
 notes_col = "Notes"
 meet_loc_col = None  # not in sheet; parsed from Notes
 
@@ -685,14 +689,14 @@ def get_weather_blurb_for_date(run_date):
 # Compose message
 # ----------------------------
 # Meeting location: parse from Notes (pattern "Meeting: XYZ")
-notes = str(row.get(notes_col, ""))
-# Detect post-run social from notes
-has_after_social = "social after the run" in notes.lower()
 meet_loc = ""
 if meet_loc_col:
     meet_loc = clean(row.get(meet_loc_col, ""))
 if not meet_loc:
     notes = str(row.get(notes_col, ""))
+    # Detect post-run social from notes
+    has_after_social = "social after the run" in notes.lower()
+
     m = re.search(r"Meeting:\s*([^|\n]+)", notes, re.IGNORECASE)
     if m: meet_loc = m.group(1).strip()
 if not meet_loc:
@@ -1177,11 +1181,9 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
             lines.append(f"🗺️ Meeting point map: {meet_map_url}")
     else:
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
-        # If the notes mention a post-run social, add a friendly line
         if has_after_social:
             lines.append("After the run we are having a social, please join us for drinks and a bite to eat if you can.")
     return lines
-
 
 def build_safety_and_weather_lines() -> list[str]:
     """Combine safety and weather guidance into a single friendly paragraph where possible."""
@@ -1303,11 +1305,9 @@ def make_email_html(email_text: str) -> str:
 
         # Default: escape text and autolink any bare URLs
         escaped = _html.escape(line.lstrip())
-
         def _linkify(match: _re.Match) -> str:
             url = match.group(1)
             return f"<a href=\"{url}\">{url}</a>"
-
         escaped = url_pattern.sub(_linkify, escaped)
         html_lines.append(escaped)
 
