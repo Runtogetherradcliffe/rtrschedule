@@ -1290,6 +1290,8 @@ def make_email_html(email_text: str) -> str:
     lines = email_text.split("\n")
     html_lines: list[str] = []
 
+    url_pattern = _re.compile(r"(https?://\S+)")
+
     for line in lines:
         stripped = line.strip()
 
@@ -1325,11 +1327,17 @@ def make_email_html(email_text: str) -> str:
             )
             continue
 
-        # Default: escape as normal text (strip leading spaces to avoid odd indentation)
-        html_lines.append(_html.escape(line.lstrip()))
+        # Default: escape text and autolink any bare URLs
+        escaped = _html.escape(line.lstrip())
+        def _linkify(match: _re.Match) -> str:
+            url = match.group(1)
+            return f"<a href=\"{url}\">{url}</a>"
+        escaped = url_pattern.sub(_linkify, escaped)
+        html_lines.append(escaped)
 
     # Join with <br> so line breaks are preserved
     return "<br>".join(html_lines)
+
 
 # ----------------------------
 # Facebook post
