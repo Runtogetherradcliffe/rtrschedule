@@ -1174,40 +1174,9 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
             lines.append(f"🗺️ Meeting point map: {meet_map_url}")
     else:
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
+        if has_after_social:
+            lines.append("After the run we are having a social, please join us for drinks and a bite to eat if you can.")
     return lines
-
-def build_route_detail_lines() -> list[str]:
-    lines: list[str] = []
-
-    # Special case: out-and-back nights – all groups use the same primary route.
-    if IS_OAB_NIGHT and PRIMARY_OAB_ROUTE is not None:
-        lines.append("This week’s route")
-        lines.append("")
-        lines.append(route_blurb("All groups", PRIMARY_OAB_ROUTE))
-        lines.append("")
-        lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
-        lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
-        return lines
-
-    lines.append("This week’s routes")
-    lines.append("")
-    # Route 3 (walk/C25K) first if present
-    label3 = (route3_desc or "Walk").strip() or "Walk"
-    if route3 is not None:
-        lines.append(route_blurb(label3, route3))
-        lines.append("")
-    # Then 8k and 5k from labeled list
-    for label, r in labeled:
-        lines.append(route_blurb(label, r))
-        lines.append("")
-    # Trim trailing blank lines
-    while lines and not lines[-1].strip():
-        lines.pop()
-    lines.append("")
-    lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
-    lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
-    return lines
-
 
 def build_safety_and_weather_lines() -> list[str]:
     """Combine safety and weather guidance into a single friendly paragraph where possible."""
@@ -1290,8 +1259,6 @@ def make_email_html(email_text: str) -> str:
     lines = email_text.split("\n")
     html_lines: list[str] = []
 
-    url_pattern = _re.compile(r"(https?://\S+)")
-
     for line in lines:
         stripped = line.strip()
 
@@ -1327,17 +1294,11 @@ def make_email_html(email_text: str) -> str:
             )
             continue
 
-        # Default: escape text and autolink any bare URLs
-        escaped = _html.escape(line.lstrip())
-        def _linkify(match: _re.Match) -> str:
-            url = match.group(1)
-            return f"<a href=\"{url}\">{url}</a>"
-        escaped = url_pattern.sub(_linkify, escaped)
-        html_lines.append(escaped)
+        # Default: escape as normal text (strip leading spaces to avoid odd indentation)
+        html_lines.append(_html.escape(line.lstrip()))
 
     # Join with <br> so line breaks are preserved
     return "<br>".join(html_lines)
-
 
 # ----------------------------
 # Facebook post
