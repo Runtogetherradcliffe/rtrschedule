@@ -427,6 +427,10 @@ r_dist    = ["Route 1 - Distance (km)", "Route 2 - Distance (km)"]
 # Elevation/POI columns not present in your sheet
 r_elev = [None, None]
 r_pois = [None, None]
+
+# Global flag for post-run social (from Notes)
+has_after_social = False
+
 notes_col = "Notes"
 meet_loc_col = None  # not in sheet; parsed from Notes
 
