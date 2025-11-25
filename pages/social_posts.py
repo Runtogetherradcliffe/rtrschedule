@@ -1182,6 +1182,27 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
             lines.append("After the run we are having a social, please join us for drinks and a bite to eat if you can.")
     return lines
 
+def build_route_detail_lines() -> list[str]:
+    lines: list[str] = []
+    lines.append("This week’s routes")
+    lines.append("")
+    # Route 3 (walk/C25K) first if present
+    label3 = (route3_desc or "Walk").strip() or "Walk"
+    if route3 is not None:
+        lines.append(route_blurb(label3, route3))
+        lines.append("")
+    # Then 8k and 5k from labeled list
+    for label, r in labeled:
+        lines.append(route_blurb(label, r))
+        lines.append("")
+    # Trim trailing blank lines
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.append("")
+    lines.append("📍 If you want to look ahead, our upcoming schedule is available at this link:")
+    lines.append("https://runtogetherradcliffe.github.io/weeklyschedule")
+    return lines
+
 def build_safety_and_weather_lines() -> list[str]:
     """Combine safety and weather guidance into a single friendly paragraph where possible."""
     safety = SAFETY_NOTE if is_road else ""
