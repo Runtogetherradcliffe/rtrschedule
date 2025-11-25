@@ -1182,7 +1182,9 @@ def build_common_meeting_lines(include_map: bool = True) -> list[str]:
     else:
         lines.append(f"📍 Meeting at: {nice_meet_loc} at 7pm")
         if has_after_social:
-            lines.append("After the run we are having a social, please join us for drinks and a bite to eat if you can.")
+            lines.append(
+                "After the run we are having a social, please join us for drinks and a bite to eat if you can."
+            )
     return lines
 
 def build_safety_and_weather_lines() -> list[str]:
