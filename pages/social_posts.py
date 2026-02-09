@@ -1236,8 +1236,7 @@ BOOKING_BLOCK = [
     "· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses",
     "",
     "ℹ️ Cancellation info:",
-    "· On the website you can cancel until midnight the day before.",
-    "· On the app you can cancel up to 1 hour before the session.",
+    "· You should be able to cancel up to the session time using either the website or the app.",
 ]
 
 def build_email_booking_block() -> list[str]:
