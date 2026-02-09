@@ -1252,8 +1252,7 @@ def build_email_booking_block() -> list[str]:
     lines.append("· https://clubspark.englandathletics.org/EnglandAthleticsRunTogether/Courses")
     lines.append("")
     lines.append("ℹ️ Cancellation info:")
-    lines.append("· On the website you can cancel until midnight the day before.")
-    lines.append("· On the app you can cancel up to 1 hour before the session.")
+    lines.append("· You should be able to cancel up to the session time using either the website or the app.")
     return lines
 
 # ----------------------------
